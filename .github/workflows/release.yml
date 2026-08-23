@@ -1,4 +1,4 @@
-﻿name: Release SamarDB
+name: Release SamarDB
 
 on:
   push:
@@ -35,6 +35,10 @@ jobs:
     steps:
       - name: Checkout SamarDB Repository
         uses: actions/checkout@v4
+
+      - name: Setup MSVC C++ Environment (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
 
       - name: Setup L++ Pure Native AOT Toolchain
         shell: bash
