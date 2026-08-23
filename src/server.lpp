@@ -1,4 +1,4 @@
-﻿# samardb-server: Network Server Layer & PostgreSQL Wire Protocol Daemon
+# samardb-server: Network Server Layer & PostgreSQL Wire Protocol Daemon
 # Exposes SamarDB kernel over TCP sockets for standard client drivers (psql, libpq, pgwire).
 
 import bytes
@@ -147,3 +147,22 @@ def server_execute_sql(srv: SamarDBServer, sql_text: Str) -> Tuple[SamarDBServer
         srv.wal_mgr
     )
     return (next_srv, result_msg)
+
+# ── Server Daemon Loop ────────────────────────────────────────────────────────
+def server_run_loop(srv: SamarDBServer, max_conns: Int) -> SamarDBServer:
+    listener := server_listen(srv.port)
+    if listener <= 0:
+        print_str("[SERVER] Failed to bind to port.")
+        return srv
+    
+    print_str(str_concat("[SERVER] Listening on port ", int_to_str(srv.port)))
+    mut cur_srv := srv
+    mut conns := 0
+    while conns < max_conns:
+        client_fd := net_accept_timeout(listener, 200)
+        if client_fd > 0:
+            cur_srv = server_handle_client(cur_srv, client_fd)
+            conns = conns + 1
+    
+    net_close(listener)
+    return cur_srv

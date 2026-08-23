@@ -1,4 +1,4 @@
-﻿name: SamarDB 5000-Quadrant High-Throughput Relational Workload Matrix
+name: SamarDB 5000-Quadrant High-Throughput Relational Workload Matrix
 
 on:
   push:
@@ -41,11 +41,21 @@ jobs:
         run: |
           lpp src/test_5000_quadrant.lpp
           lpp src/test_pg_benchmark.lpp
+          lpp src/test_server.lpp
+          lpp src/test_server_live.lpp
           lpp src/bench_engine.lpp
 
       - name: Execute 5,000-Quadrant Stress Run
         run: |
           .\src\test_5000_quadrant.exe
+
+      - name: Execute Server Protocol & Query Suite
+        run: |
+          .\src\test_server.exe
+
+      - name: Execute Live TCP Socket Server End-to-End Test
+        run: |
+          python scripts/test_live_tcp_client.py
 
       - name: Execute PostgreSQL Comparative Head-to-Head Benchmark
         run: |

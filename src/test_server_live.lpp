@@ -1,0 +1,30 @@
+﻿# samardb Live TCP Socket Server Test Daemon
+import bytes
+import io
+import pager
+import heap
+import btree
+import schema
+import parser
+import exec
+import opt
+import agg
+import wal
+import recovery
+import concur
+import pgwire
+import server
+
+def main() -> Void:
+    print_str("================================================================")
+    print_str("        SAMARDB LIVE TCP SOCKET SERVER DAEMON                   ")
+    print_str("================================================================")
+    
+    port := 5433
+    srv := server_init(port)
+    print_str(str_concat(" [SERVER] Initialized live server on TCP port ", int_to_str(port)))
+    
+    # Run loop for 5 connections
+    srv_done := server_run_loop(srv, 5)
+    print_str(str_concat(" [SERVER] Completed live session. Total queries served: ", int_to_str(srv_done.queries_served)))
+    print_str("================================================================")
