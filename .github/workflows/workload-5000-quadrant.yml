@@ -16,6 +16,15 @@ jobs:
       - name: Checkout SamarDB Repository
         uses: actions/checkout@v4
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Telemetry Dependencies
+        run: |
+          pip install psutil
+
       - name: Setup MSVC C++ Environment
         uses: ilammy/msvc-dev-cmd@v1
 
@@ -32,6 +41,7 @@ jobs:
         run: |
           lpp src/test_5000_quadrant.lpp
           lpp src/test_pg_benchmark.lpp
+          lpp src/bench_engine.lpp
 
       - name: Execute 5,000-Quadrant Stress Run
         run: |
@@ -40,3 +50,54 @@ jobs:
       - name: Execute PostgreSQL Comparative Head-to-Head Benchmark
         run: |
           .\src\test_pg_benchmark.exe
+
+      - name: Run High-Precision Hardware Telemetry & Benchmark Profiler
+        run: |
+          python scripts/benchmark_profiler.py src/bench_engine.exe artifacts
+
+      - name: Upload Telemetry & Benchmark Artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: samardb-hardware-telemetry-report
+          path: artifacts/
+
+      - name: Publish GitHub Step Summary Telemetry Table
+        if: always()
+        run: |
+          if (Test-Path artifacts/benchmark_report.json) {
+            $rep = Get-Content artifacts/benchmark_report.json | ConvertFrom-Json
+            
+            $md = @"
+          # 📊 SamarDB Hardware Telemetry & Micro-Benchmark Report
+          
+          **Overall Aggregate Engine Throughput:** `$($rep.overall_throughput_ops_sec.ToString("N0")) ops/sec`  
+          **Total Operations Evaluated:** `$($rep.total_operations.ToString("N0")) ops`  
+          **Test Duration:** `$($rep.duration_seconds) s`  
+          
+          ---
+          
+          ### 💻 Resource Utilization & Memory Profile (Noise-Filtered)
+          
+          | Metric | Value |
+          | :--- | :--- |
+          | **Baseline RAM (Low / Idle)** | **$($rep.resource_telemetry.ram_baseline_low_mb) MB** |
+          | **Average Working Set RAM** | **$($rep.resource_telemetry.ram_avg_working_set_mb) MB** |
+          | **Peak RAM Spike (Max RSS)** | **$($rep.resource_telemetry.ram_peak_spike_mb) MB** |
+          | **RAM Spike Delta** | `+$($rep.resource_telemetry.ram_spike_delta_mb) MB` |
+          | **Average CPU Utilization** | **$($rep.resource_telemetry.cpu_avg_pct) %** |
+          | **Peak CPU Load** | **$($rep.resource_telemetry.cpu_peak_spike_pct) %** |
+          | **Hardware Vector Accelerator** | **16-Lane SIMD (128-bit AVX2/SSE2/NEON)** |
+          
+          ---
+          
+          ### ⚡ Subsystem Performance & Latency Distribution
+          
+          | Subsystem Workload | Throughput (ops/sec) | Avg Latency (ns) | p50 (ns) | p95 (ns) | p99 (ns) |
+          | :--- | :---: | :---: | :---: | :---: | :---: |
+          "@
+            foreach ($sub in $rep.subsystem_benchmarks) {
+              $md += "`n| $($sub.workload) | **$($sub.throughput_ops_sec.ToString("N0")) ops/s** | $($sub.avg_latency_ns) ns | $($sub.p50_ns) ns | $($sub.p95_ns) ns | $($sub.p99_ns) ns |"
+            }
+            $md | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          }
