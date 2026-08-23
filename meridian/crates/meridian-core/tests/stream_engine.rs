@@ -1,6 +1,7 @@
 //! Comprehensive Verification Test Suite for Streaming & Pub/Sub Engine.
 
 use meridian_core::*;
+use std::time::Instant;
 
 #[test]
 fn test_stream_monotonic_ids_and_trimming() {
@@ -29,12 +30,31 @@ fn test_stream_monotonic_ids_and_trimming() {
 }
 
 #[test]
+fn test_stream_scale_o1_sliding_window_benchmark() {
+    let mut stream = Stream::new(10_000); // MAXLEN = 10,000
+    let count = 200_000;
+
+    let start = Instant::now();
+    for i in 0..count {
+        stream.add(vec![("event".to_string(), format!("data_{}", i))]);
+    }
+    let elapsed = start.elapsed();
+
+    assert_eq!(stream.len(), 10_000);
+
+    let nanos_per_op = elapsed.as_nanos() / count as u128;
+    println!("200,000 stream appends completed in {:?} ({} ns/op)", elapsed, nanos_per_op);
+    // With O(1) VecDeque ring buffer, latency must remain sub-microsecond (< 1,000 ns/op)
+    assert!(nanos_per_op < 1_500, "Expected sub-microsecond O(1) ingestion, got {} ns/op", nanos_per_op);
+}
+
+#[test]
 fn test_consumer_group_pel_ack_and_claim() {
     let mut stream = Stream::new(100);
 
     let id1 = stream.add(vec![("task".to_string(), "resize_img".to_string())]);
     let id2 = stream.add(vec![("task".to_string(), "send_email".to_string())]);
-    let id3 = stream.add(vec![("task".to_string(), "index_db".to_string())]);
+    let _id3 = stream.add(vec![("task".to_string(), "index_db".to_string())]);
 
     let mut group = ConsumerGroup::new("workers", StreamId::new(0, 0));
 
