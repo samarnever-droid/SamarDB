@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/meridian-core",
+    "crates/meridian-proto",
+    "crates/meridian-sim",
+    "crates/meridian-server",
+    "crates/meridian-bench",
+    "crates/meridian-bounded",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"

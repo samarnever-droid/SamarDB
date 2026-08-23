@@ -1,0 +1,333 @@
+{"ts":1787410310,"phase":"0-1","bench":"engine/get_hit_llc","metric":"throughput","value":2253492.621,"unit":"ops/s","cores":8}
+{"ts":1787410310,"phase":"0-1","bench":"engine/get_hit_dram","metric":"throughput","value":2361576.153,"unit":"ops/s","cores":8}
+{"ts":1787410310,"phase":"0-1","bench":"engine/set_replace","metric":"throughput","value":2049731.021,"unit":"ops/s","cores":8}
+{"ts":1787410310,"phase":"0-1","bench":"engine/ttl_read","metric":"throughput","value":2310360.499,"unit":"ops/s","cores":8}
+{"ts":1787410310,"phase":"0-1","bench":"engine/get_hit_4r1w","metric":"throughput","value":8690727.000,"unit":"ops/s","cores":8}
+{"ts":1787410310,"phase":"0-1","bench":"engine/get_hit_4r1w","metric":"seqlock_retries","value":4.000,"unit":"count","cores":8}
+{"ts":1787410310,"phase":"0-1","bench":"engine/sweep","metric":"throughput","value":17943.021,"unit":"sweeps/s","cores":8}
+{"ts":1787410310,"phase":"0-1","bench":"engine/hash_key","metric":"throughput","value":42516247.835,"unit":"ops/s","cores":8}
+{"ts":1787410310,"phase":"0-1","bench":"server/ping_rtt","metric":"p50_us","value":17.500,"unit":"µs","cores":8}
+{"ts":1787410310,"phase":"0-1","bench":"server/ping_rtt","metric":"p99_us","value":67.300,"unit":"µs","cores":8}
+{"ts":1787410310,"phase":"0-1","bench":"server/ping_rtt","metric":"p99.9_us","value":239.800,"unit":"µs","cores":8}
+{"ts":1787410310,"phase":"0-1","bench":"server/pipeline_set","metric":"throughput","value":698649.409,"unit":"ops/s","cores":8}
+{"ts":1787410310,"phase":"0-1","bench":"server/pipeline_get","metric":"throughput","value":900226.169,"unit":"ops/s","cores":8}
+{"ts":1787410310,"phase":"0-1","bench":"sim/policy_lru","metric":"throughput","value":13452432.200,"unit":"ops/s","cores":8}
+{"ts":1787410310,"phase":"0-1","bench":"sim/policy_lru","metric":"hit_ratio","value":0.766,"unit":"ratio","cores":8}
+{"ts":1787410310,"phase":"0-1","bench":"sim/policy_belady","metric":"throughput","value":525881.522,"unit":"ops/s","cores":8}
+{"ts":1787410310,"phase":"0-1","bench":"sim/policy_belady","metric":"hit_ratio","value":0.874,"unit":"ratio","cores":8}
+{"ts":1787410897,"phase":"1","bench":"engine/get_hit_llc","metric":"throughput","value":7031030.543,"unit":"ops/s","cores":8}
+{"ts":1787410897,"phase":"1","bench":"engine/get_hit_dram","metric":"throughput","value":3382309.861,"unit":"ops/s","cores":8}
+{"ts":1787410897,"phase":"1","bench":"engine/set_replace","metric":"throughput","value":2509027.523,"unit":"ops/s","cores":8}
+{"ts":1787410897,"phase":"1","bench":"engine/ttl_read","metric":"throughput","value":3596435.388,"unit":"ops/s","cores":8}
+{"ts":1787410897,"phase":"1","bench":"engine/get_hit_4r1w","metric":"throughput","value":12013493.500,"unit":"ops/s","cores":8}
+{"ts":1787410897,"phase":"1","bench":"engine/get_hit_4r1w","metric":"seqlock_retries","value":29.000,"unit":"count","cores":8}
+{"ts":1787410897,"phase":"1","bench":"engine/sweep","metric":"throughput","value":27379.994,"unit":"sweeps/s","cores":8}
+{"ts":1787410897,"phase":"1","bench":"engine/hash_key","metric":"throughput","value":54887100.394,"unit":"ops/s","cores":8}
+{"ts":1787410897,"phase":"1","bench":"engine/tag_match","metric":"throughput","value":750225039.466,"unit":"matches/s","cores":8}
+{"ts":1787410897,"phase":"1","bench":"engine/lookup_miss_dram","metric":"throughput","value":2497140.014,"unit":"ops/s","cores":8}
+{"ts":1787410897,"phase":"1","bench":"server/ping_rtt","metric":"p50_us","value":15.700,"unit":"µs","cores":8}
+{"ts":1787410897,"phase":"1","bench":"server/ping_rtt","metric":"p99_us","value":39.700,"unit":"µs","cores":8}
+{"ts":1787410897,"phase":"1","bench":"server/ping_rtt","metric":"p99.9_us","value":96.300,"unit":"µs","cores":8}
+{"ts":1787410897,"phase":"1","bench":"server/pipeline_set","metric":"throughput","value":629083.189,"unit":"ops/s","cores":8}
+{"ts":1787410897,"phase":"1","bench":"server/pipeline_get","metric":"throughput","value":1098182.843,"unit":"ops/s","cores":8}
+{"ts":1787410897,"phase":"1","bench":"sim/policy_lru","metric":"throughput","value":14105168.134,"unit":"ops/s","cores":8}
+{"ts":1787410897,"phase":"1","bench":"sim/policy_lru","metric":"hit_ratio","value":0.766,"unit":"ratio","cores":8}
+{"ts":1787410897,"phase":"1","bench":"sim/policy_belady","metric":"throughput","value":565904.695,"unit":"ops/s","cores":8}
+{"ts":1787410897,"phase":"1","bench":"sim/policy_belady","metric":"hit_ratio","value":0.874,"unit":"ratio","cores":8}
+{"ts":1787411190,"phase":"1","bench":"engine/get_hit_llc","metric":"throughput","value":7862969.233,"unit":"ops/s","cores":8}
+{"ts":1787411190,"phase":"1","bench":"engine/get_hit_llc_ref","metric":"throughput","value":6199118.717,"unit":"ops/s (zero-copy)","cores":8}
+{"ts":1787411190,"phase":"1","bench":"engine/get_hit_dram","metric":"throughput","value":3183808.801,"unit":"ops/s","cores":8}
+{"ts":1787411190,"phase":"1","bench":"engine/get_hit_dram_ref","metric":"throughput","value":4432754.923,"unit":"ops/s (zero-copy)","cores":8}
+{"ts":1787411190,"phase":"1","bench":"engine/set_replace","metric":"throughput","value":3701949.920,"unit":"ops/s","cores":8}
+{"ts":1787411190,"phase":"1","bench":"engine/ttl_read","metric":"throughput","value":5140526.009,"unit":"ops/s","cores":8}
+{"ts":1787411190,"phase":"1","bench":"engine/get_hit_4r1w","metric":"throughput","value":11356697.500,"unit":"ops/s","cores":8}
+{"ts":1787411190,"phase":"1","bench":"engine/get_hit_4r1w","metric":"seqlock_retries","value":33.000,"unit":"count","cores":8}
+{"ts":1787411190,"phase":"1","bench":"engine/sweep","metric":"throughput","value":25708.363,"unit":"sweeps/s","cores":8}
+{"ts":1787411190,"phase":"1","bench":"engine/hash_key","metric":"throughput","value":55741233.962,"unit":"ops/s","cores":8}
+{"ts":1787411190,"phase":"1","bench":"engine/tag_match","metric":"throughput","value":758862388.114,"unit":"matches/s","cores":8}
+{"ts":1787411190,"phase":"1","bench":"engine/lookup_miss_dram","metric":"throughput","value":2184673.742,"unit":"ops/s","cores":8}
+{"ts":1787411190,"phase":"1","bench":"server/ping_rtt","metric":"p50_us","value":14.900,"unit":"µs","cores":8}
+{"ts":1787411190,"phase":"1","bench":"server/ping_rtt","metric":"p99_us","value":35.400,"unit":"µs","cores":8}
+{"ts":1787411190,"phase":"1","bench":"server/ping_rtt","metric":"p99.9_us","value":82.600,"unit":"µs","cores":8}
+{"ts":1787411190,"phase":"1","bench":"server/pipeline_set","metric":"throughput","value":503808.736,"unit":"ops/s","cores":8}
+{"ts":1787411190,"phase":"1","bench":"server/pipeline_get","metric":"throughput","value":432612.546,"unit":"ops/s","cores":8}
+{"ts":1787411190,"phase":"1","bench":"sim/policy_lru","metric":"throughput","value":19827697.310,"unit":"ops/s","cores":8}
+{"ts":1787411190,"phase":"1","bench":"sim/policy_lru","metric":"hit_ratio","value":0.766,"unit":"ratio","cores":8}
+{"ts":1787411190,"phase":"1","bench":"sim/policy_belady","metric":"throughput","value":757299.802,"unit":"ops/s","cores":8}
+{"ts":1787411190,"phase":"1","bench":"sim/policy_belady","metric":"hit_ratio","value":0.874,"unit":"ratio","cores":8}
+{"ts":1787411216,"phase":"1","bench":"server/ping_rtt","metric":"p50_us","value":9.700,"unit":"µs","cores":8}
+{"ts":1787411216,"phase":"1","bench":"server/ping_rtt","metric":"p99_us","value":36.200,"unit":"µs","cores":8}
+{"ts":1787411216,"phase":"1","bench":"server/ping_rtt","metric":"p99.9_us","value":94.200,"unit":"µs","cores":8}
+{"ts":1787411216,"phase":"1","bench":"server/pipeline_set","metric":"throughput","value":409650.411,"unit":"ops/s","cores":8}
+{"ts":1787411216,"phase":"1","bench":"server/pipeline_get","metric":"throughput","value":457157.341,"unit":"ops/s","cores":8}
+{"ts":1787411754,"phase":"2","bench":"engine/get_hit_llc","metric":"throughput","value":9280558.188,"unit":"ops/s","cores":8}
+{"ts":1787411754,"phase":"2","bench":"engine/get_hit_llc_ref","metric":"throughput","value":5605794.944,"unit":"ops/s (zero-copy)","cores":8}
+{"ts":1787411754,"phase":"2","bench":"engine/get_hit_dram","metric":"throughput","value":3227122.607,"unit":"ops/s","cores":8}
+{"ts":1787411754,"phase":"2","bench":"engine/get_hit_dram_ref","metric":"throughput","value":4208877.481,"unit":"ops/s (zero-copy)","cores":8}
+{"ts":1787411754,"phase":"2","bench":"engine/set_replace","metric":"throughput","value":2468727.236,"unit":"ops/s","cores":8}
+{"ts":1787411754,"phase":"2","bench":"engine/ttl_read","metric":"throughput","value":3208671.111,"unit":"ops/s","cores":8}
+{"ts":1787411754,"phase":"2","bench":"engine/get_hit_4r1w","metric":"throughput","value":12361522.500,"unit":"ops/s","cores":8}
+{"ts":1787411754,"phase":"2","bench":"engine/get_hit_4r1w","metric":"seqlock_retries","value":4.000,"unit":"count","cores":8}
+{"ts":1787411754,"phase":"2","bench":"engine/sweep","metric":"throughput","value":24958.680,"unit":"sweeps/s","cores":8}
+{"ts":1787411754,"phase":"2","bench":"engine/hash_key","metric":"throughput","value":55199855.440,"unit":"ops/s","cores":8}
+{"ts":1787411754,"phase":"2","bench":"engine/tag_match","metric":"throughput","value":763565197.465,"unit":"matches/s","cores":8}
+{"ts":1787411754,"phase":"2","bench":"engine/lookup_miss_dram","metric":"throughput","value":1972478.323,"unit":"ops/s","cores":8}
+{"ts":1787412208,"phase":"2","bench":"engine/get_hit_llc","metric":"throughput","value":7797031.106,"unit":"ops/s","cores":8}
+{"ts":1787412208,"phase":"2","bench":"engine/get_hit_llc_ref","metric":"throughput","value":5979510.134,"unit":"ops/s (zero-copy)","cores":8}
+{"ts":1787412208,"phase":"2","bench":"engine/get_hit_dram","metric":"throughput","value":3552316.861,"unit":"ops/s","cores":8}
+{"ts":1787412208,"phase":"2","bench":"engine/get_hit_dram_ref","metric":"throughput","value":3732248.341,"unit":"ops/s (zero-copy)","cores":8}
+{"ts":1787412208,"phase":"2","bench":"engine/set_replace","metric":"throughput","value":3881303.440,"unit":"ops/s","cores":8}
+{"ts":1787412208,"phase":"2","bench":"engine/ttl_read","metric":"throughput","value":5554710.461,"unit":"ops/s","cores":8}
+{"ts":1787412208,"phase":"2","bench":"engine/get_hit_4r1w","metric":"throughput","value":12315849.500,"unit":"ops/s","cores":8}
+{"ts":1787412208,"phase":"2","bench":"engine/get_hit_4r1w","metric":"seqlock_retries","value":32.000,"unit":"count","cores":8}
+{"ts":1787412208,"phase":"2","bench":"engine/sweep","metric":"throughput","value":24270.979,"unit":"sweeps/s","cores":8}
+{"ts":1787412208,"phase":"2","bench":"engine/hash_key","metric":"throughput","value":55091972.043,"unit":"ops/s","cores":8}
+{"ts":1787412208,"phase":"2","bench":"engine/tag_match","metric":"throughput","value":767091852.936,"unit":"matches/s","cores":8}
+{"ts":1787412208,"phase":"2","bench":"engine/lookup_miss_dram","metric":"throughput","value":2567116.658,"unit":"ops/s","cores":8}
+{"ts":1787412208,"phase":"2","bench":"server/ping_rtt","metric":"p50_us","value":15.000,"unit":"µs","cores":8}
+{"ts":1787412208,"phase":"2","bench":"server/ping_rtt","metric":"p99_us","value":33.300,"unit":"µs","cores":8}
+{"ts":1787412208,"phase":"2","bench":"server/ping_rtt","metric":"p99.9_us","value":75.100,"unit":"µs","cores":8}
+{"ts":1787412208,"phase":"2","bench":"server/pipeline_set","metric":"throughput","value":813232.589,"unit":"ops/s","cores":8}
+{"ts":1787412208,"phase":"2","bench":"server/pipeline_get","metric":"throughput","value":1120460.623,"unit":"ops/s","cores":8}
+{"ts":1787412208,"phase":"2","bench":"sim/policy_lru","metric":"throughput","value":14289388.700,"unit":"ops/s","cores":8}
+{"ts":1787412208,"phase":"2","bench":"sim/policy_lru","metric":"hit_ratio","value":0.766,"unit":"ratio","cores":8}
+{"ts":1787412208,"phase":"2","bench":"sim/policy_belady","metric":"throughput","value":574793.412,"unit":"ops/s","cores":8}
+{"ts":1787412208,"phase":"2","bench":"sim/policy_belady","metric":"hit_ratio","value":0.874,"unit":"ratio","cores":8}
+{"ts":1787412997,"phase":"3","bench":"engine/get_hit_llc","metric":"throughput","value":7834089.977,"unit":"ops/s","cores":8}
+{"ts":1787412997,"phase":"3","bench":"engine/get_hit_llc_ref","metric":"throughput","value":5740808.878,"unit":"ops/s (zero-copy)","cores":8}
+{"ts":1787412997,"phase":"3","bench":"engine/get_hit_dram","metric":"throughput","value":3297202.186,"unit":"ops/s","cores":8}
+{"ts":1787412997,"phase":"3","bench":"engine/get_hit_dram_ref","metric":"throughput","value":4887146.497,"unit":"ops/s (zero-copy)","cores":8}
+{"ts":1787412997,"phase":"3","bench":"engine/set_replace","metric":"throughput","value":2639589.604,"unit":"ops/s","cores":8}
+{"ts":1787412997,"phase":"3","bench":"engine/ttl_read","metric":"throughput","value":3733686.633,"unit":"ops/s","cores":8}
+{"ts":1787412997,"phase":"3","bench":"engine/get_hit_4r1w","metric":"throughput","value":11835872.000,"unit":"ops/s","cores":8}
+{"ts":1787412997,"phase":"3","bench":"engine/get_hit_4r1w","metric":"seqlock_retries","value":14.000,"unit":"count","cores":8}
+{"ts":1787412997,"phase":"3","bench":"engine/sweep","metric":"throughput","value":394998.145,"unit":"ticks/s (idle wheel)","cores":8}
+{"ts":1787412997,"phase":"3","bench":"engine/wheel_expire","metric":"throughput","value":9798.963,"unit":"expirations/s","cores":8}
+{"ts":1787412997,"phase":"3","bench":"engine/hash_key","metric":"throughput","value":54940194.602,"unit":"ops/s","cores":8}
+{"ts":1787412997,"phase":"3","bench":"engine/tag_match","metric":"throughput","value":598151010.092,"unit":"matches/s","cores":8}
+{"ts":1787412997,"phase":"3","bench":"engine/lookup_miss_dram","metric":"throughput","value":2242547.330,"unit":"ops/s","cores":8}
+{"ts":1787412997,"phase":"3","bench":"server/ping_rtt","metric":"p50_us","value":15.300,"unit":"µs","cores":8}
+{"ts":1787412997,"phase":"3","bench":"server/ping_rtt","metric":"p99_us","value":40.500,"unit":"µs","cores":8}
+{"ts":1787412997,"phase":"3","bench":"server/ping_rtt","metric":"p99.9_us","value":95.500,"unit":"µs","cores":8}
+{"ts":1787412997,"phase":"3","bench":"server/pipeline_set","metric":"throughput","value":726655.782,"unit":"ops/s","cores":8}
+{"ts":1787412997,"phase":"3","bench":"server/pipeline_get","metric":"throughput","value":690346.569,"unit":"ops/s","cores":8}
+{"ts":1787412997,"phase":"3","bench":"sim/policy_lru","metric":"throughput","value":12515722.877,"unit":"ops/s","cores":8}
+{"ts":1787412997,"phase":"3","bench":"sim/policy_lru","metric":"hit_ratio","value":0.766,"unit":"ratio","cores":8}
+{"ts":1787412997,"phase":"3","bench":"sim/policy_belady","metric":"throughput","value":571371.761,"unit":"ops/s","cores":8}
+{"ts":1787412997,"phase":"3","bench":"sim/policy_belady","metric":"hit_ratio","value":0.874,"unit":"ratio","cores":8}
+{"ts":1787413133,"phase":"3","bench":"engine/get_hit_llc","metric":"throughput","value":4012549.617,"unit":"ops/s","cores":8}
+{"ts":1787413133,"phase":"3","bench":"engine/get_hit_llc_ref","metric":"throughput","value":3813627.424,"unit":"ops/s (zero-copy)","cores":8}
+{"ts":1787413133,"phase":"3","bench":"engine/get_hit_dram","metric":"throughput","value":2640639.208,"unit":"ops/s","cores":8}
+{"ts":1787413133,"phase":"3","bench":"engine/get_hit_dram_ref","metric":"throughput","value":4494481.436,"unit":"ops/s (zero-copy)","cores":8}
+{"ts":1787413133,"phase":"3","bench":"engine/set_replace","metric":"throughput","value":950142.068,"unit":"ops/s","cores":8}
+{"ts":1787413133,"phase":"3","bench":"engine/ttl_read","metric":"throughput","value":2300332.383,"unit":"ops/s","cores":8}
+{"ts":1787413133,"phase":"3","bench":"engine/get_hit_4r1w","metric":"throughput","value":8518714.500,"unit":"ops/s","cores":8}
+{"ts":1787413133,"phase":"3","bench":"engine/get_hit_4r1w","metric":"seqlock_retries","value":15.000,"unit":"count","cores":8}
+{"ts":1787413133,"phase":"3","bench":"engine/sweep","metric":"throughput","value":342560.494,"unit":"ticks/s (idle wheel)","cores":8}
+{"ts":1787413133,"phase":"3","bench":"engine/wheel_expire","metric":"throughput","value":9651.952,"unit":"expirations/s","cores":8}
+{"ts":1787413133,"phase":"3","bench":"engine/hash_key","metric":"throughput","value":44223474.733,"unit":"ops/s","cores":8}
+{"ts":1787413133,"phase":"3","bench":"engine/tag_match","metric":"throughput","value":617482178.252,"unit":"matches/s","cores":8}
+{"ts":1787413133,"phase":"3","bench":"engine/lookup_miss_dram","metric":"throughput","value":2290331.225,"unit":"ops/s","cores":8}
+{"ts":1787413704,"phase":"3","bench":"engine/get_hit_llc","metric":"throughput","value":3643004.903,"unit":"ops/s","cores":8}
+{"ts":1787413704,"phase":"3","bench":"engine/get_hit_llc_ref","metric":"throughput","value":3628869.031,"unit":"ops/s (zero-copy)","cores":8}
+{"ts":1787413704,"phase":"3","bench":"engine/get_hit_dram","metric":"throughput","value":2991161.708,"unit":"ops/s","cores":8}
+{"ts":1787413704,"phase":"3","bench":"engine/get_hit_dram_ref","metric":"throughput","value":4400211.778,"unit":"ops/s (zero-copy)","cores":8}
+{"ts":1787413704,"phase":"3","bench":"engine/set_replace","metric":"throughput","value":2466941.903,"unit":"ops/s","cores":8}
+{"ts":1787413704,"phase":"3","bench":"engine/ttl_read","metric":"throughput","value":2494800.724,"unit":"ops/s","cores":8}
+{"ts":1787413704,"phase":"3","bench":"engine/get_hit_4r1w","metric":"throughput","value":8009049.500,"unit":"ops/s","cores":8}
+{"ts":1787413704,"phase":"3","bench":"engine/get_hit_4r1w","metric":"seqlock_retries","value":30.000,"unit":"count","cores":8}
+{"ts":1787413704,"phase":"3","bench":"engine/sweep","metric":"throughput","value":418496.472,"unit":"ticks/s (idle wheel)","cores":8}
+{"ts":1787413704,"phase":"3","bench":"engine/wheel_expire","metric":"throughput","value":207180.546,"unit":"expirations/s","cores":8}
+{"ts":1787413704,"phase":"3","bench":"engine/hash_key","metric":"throughput","value":59621962.340,"unit":"ops/s","cores":8}
+{"ts":1787413704,"phase":"3","bench":"engine/tag_match","metric":"throughput","value":978819023.059,"unit":"matches/s","cores":8}
+{"ts":1787413704,"phase":"3","bench":"engine/lookup_miss_dram","metric":"throughput","value":1057332.665,"unit":"ops/s","cores":8}
+{"ts":1787413704,"phase":"3","bench":"server/ping_rtt","metric":"p50_us","value":17.300,"unit":"µs","cores":8}
+{"ts":1787413704,"phase":"3","bench":"server/ping_rtt","metric":"p99_us","value":143.500,"unit":"µs","cores":8}
+{"ts":1787413704,"phase":"3","bench":"server/ping_rtt","metric":"p99.9_us","value":905.000,"unit":"µs","cores":8}
+{"ts":1787413704,"phase":"3","bench":"server/pipeline_set","metric":"throughput","value":375090.750,"unit":"ops/s","cores":8}
+{"ts":1787413704,"phase":"3","bench":"server/pipeline_get","metric":"throughput","value":383024.940,"unit":"ops/s","cores":8}
+{"ts":1787413704,"phase":"3","bench":"sim/policy_lru","metric":"throughput","value":13701914.843,"unit":"ops/s","cores":8}
+{"ts":1787413704,"phase":"3","bench":"sim/policy_lru","metric":"hit_ratio","value":0.766,"unit":"ratio","cores":8}
+{"ts":1787413704,"phase":"3","bench":"sim/policy_belady","metric":"throughput","value":499262.589,"unit":"ops/s","cores":8}
+{"ts":1787413704,"phase":"3","bench":"sim/policy_belady","metric":"hit_ratio","value":0.874,"unit":"ratio","cores":8}
+{"ts":1787414171,"phase":"opt-1","bench":"engine/get_hit_llc","metric":"throughput","value":6081738.785,"unit":"ops/s","cores":8}
+{"ts":1787414171,"phase":"opt-1","bench":"engine/get_hit_llc_ref","metric":"throughput","value":3704259.435,"unit":"ops/s (zero-copy)","cores":8}
+{"ts":1787414171,"phase":"opt-1","bench":"engine/get_hit_dram","metric":"throughput","value":2561987.793,"unit":"ops/s","cores":8}
+{"ts":1787414171,"phase":"opt-1","bench":"engine/get_hit_dram_ref","metric":"throughput","value":1583897.047,"unit":"ops/s (zero-copy)","cores":8}
+{"ts":1787414171,"phase":"opt-1","bench":"engine/set_replace","metric":"throughput","value":1878317.824,"unit":"ops/s","cores":8}
+{"ts":1787414171,"phase":"opt-1","bench":"engine/ttl_read","metric":"throughput","value":2155401.453,"unit":"ops/s","cores":8}
+{"ts":1787414171,"phase":"opt-1","bench":"engine/get_hit_4r1w","metric":"throughput","value":10182619.000,"unit":"ops/s","cores":8}
+{"ts":1787414171,"phase":"opt-1","bench":"engine/get_hit_4r1w","metric":"seqlock_retries","value":29.000,"unit":"count","cores":8}
+{"ts":1787414171,"phase":"opt-1","bench":"engine/sweep","metric":"throughput","value":311195.173,"unit":"ticks/s (idle wheel)","cores":8}
+{"ts":1787414171,"phase":"opt-1","bench":"engine/wheel_expire","metric":"throughput","value":203253.850,"unit":"expirations/s","cores":8}
+{"ts":1787414171,"phase":"opt-1","bench":"engine/hash_key","metric":"throughput","value":37971672.708,"unit":"ops/s","cores":8}
+{"ts":1787414171,"phase":"opt-1","bench":"engine/tag_match","metric":"throughput","value":529946059.005,"unit":"matches/s","cores":8}
+{"ts":1787414171,"phase":"opt-1","bench":"engine/lookup_miss_dram","metric":"throughput","value":3227369.570,"unit":"ops/s","cores":8}
+{"ts":1787414171,"phase":"opt-1","bench":"server/ping_rtt","metric":"p50_us","value":18.300,"unit":"µs","cores":8}
+{"ts":1787414171,"phase":"opt-1","bench":"server/ping_rtt","metric":"p99_us","value":58.100,"unit":"µs","cores":8}
+{"ts":1787414171,"phase":"opt-1","bench":"server/ping_rtt","metric":"p99.9_us","value":177.900,"unit":"µs","cores":8}
+{"ts":1787414171,"phase":"opt-1","bench":"server/pipeline_set","metric":"throughput","value":863347.827,"unit":"ops/s","cores":8}
+{"ts":1787414171,"phase":"opt-1","bench":"server/pipeline_get","metric":"throughput","value":1218415.036,"unit":"ops/s","cores":8}
+{"ts":1787414171,"phase":"opt-1","bench":"sim/policy_lru","metric":"throughput","value":12202041.402,"unit":"ops/s","cores":8}
+{"ts":1787414171,"phase":"opt-1","bench":"sim/policy_lru","metric":"hit_ratio","value":0.766,"unit":"ratio","cores":8}
+{"ts":1787414171,"phase":"opt-1","bench":"sim/policy_belady","metric":"throughput","value":520601.367,"unit":"ops/s","cores":8}
+{"ts":1787414171,"phase":"opt-1","bench":"sim/policy_belady","metric":"hit_ratio","value":0.874,"unit":"ratio","cores":8}
+{"ts":1787414225,"phase":"opt-1","bench":"engine/get_hit_llc","metric":"throughput","value":1477204.792,"unit":"ops/s","cores":8}
+{"ts":1787414225,"phase":"opt-1","bench":"engine/get_hit_llc_ref","metric":"throughput","value":6270001.901,"unit":"ops/s (zero-copy)","cores":8}
+{"ts":1787414225,"phase":"opt-1","bench":"engine/get_hit_dram","metric":"throughput","value":4056016.747,"unit":"ops/s","cores":8}
+{"ts":1787414225,"phase":"opt-1","bench":"engine/get_hit_dram_ref","metric":"throughput","value":5869663.717,"unit":"ops/s (zero-copy)","cores":8}
+{"ts":1787414225,"phase":"opt-1","bench":"engine/set_replace","metric":"throughput","value":3549485.052,"unit":"ops/s","cores":8}
+{"ts":1787414225,"phase":"opt-1","bench":"engine/ttl_read","metric":"throughput","value":3803289.882,"unit":"ops/s","cores":8}
+{"ts":1787414225,"phase":"opt-1","bench":"engine/get_hit_4r1w","metric":"throughput","value":14068302.000,"unit":"ops/s","cores":8}
+{"ts":1787414225,"phase":"opt-1","bench":"engine/get_hit_4r1w","metric":"seqlock_retries","value":148.000,"unit":"count","cores":8}
+{"ts":1787414225,"phase":"opt-1","bench":"engine/sweep","metric":"throughput","value":614036.758,"unit":"ticks/s (idle wheel)","cores":8}
+{"ts":1787414225,"phase":"opt-1","bench":"engine/wheel_expire","metric":"throughput","value":196667.740,"unit":"expirations/s","cores":8}
+{"ts":1787414225,"phase":"opt-1","bench":"engine/hash_key","metric":"throughput","value":68097650.380,"unit":"ops/s","cores":8}
+{"ts":1787414225,"phase":"opt-1","bench":"engine/tag_match","metric":"throughput","value":983923997.608,"unit":"matches/s","cores":8}
+{"ts":1787414225,"phase":"opt-1","bench":"engine/lookup_miss_dram","metric":"throughput","value":2756816.529,"unit":"ops/s","cores":8}
+{"ts":1787414259,"phase":"opt-1","bench":"engine/get_hit_llc","metric":"throughput","value":4099131.554,"unit":"ops/s","cores":8}
+{"ts":1787414259,"phase":"opt-1","bench":"engine/get_hit_llc_ref","metric":"throughput","value":4580096.215,"unit":"ops/s (zero-copy)","cores":8}
+{"ts":1787414259,"phase":"opt-1","bench":"engine/get_hit_dram","metric":"throughput","value":2779832.141,"unit":"ops/s","cores":8}
+{"ts":1787414259,"phase":"opt-1","bench":"engine/get_hit_dram_ref","metric":"throughput","value":3654645.036,"unit":"ops/s (zero-copy)","cores":8}
+{"ts":1787414259,"phase":"opt-1","bench":"engine/set_replace","metric":"throughput","value":2418411.685,"unit":"ops/s","cores":8}
+{"ts":1787414259,"phase":"opt-1","bench":"engine/ttl_read","metric":"throughput","value":2995710.352,"unit":"ops/s","cores":8}
+{"ts":1787414259,"phase":"opt-1","bench":"engine/get_hit_4r1w","metric":"throughput","value":11638447.000,"unit":"ops/s","cores":8}
+{"ts":1787414259,"phase":"opt-1","bench":"engine/get_hit_4r1w","metric":"seqlock_retries","value":41.000,"unit":"count","cores":8}
+{"ts":1787414259,"phase":"opt-1","bench":"engine/sweep","metric":"throughput","value":339208.734,"unit":"ticks/s (idle wheel)","cores":8}
+{"ts":1787414259,"phase":"opt-1","bench":"engine/wheel_expire","metric":"throughput","value":204860.605,"unit":"expirations/s","cores":8}
+{"ts":1787414259,"phase":"opt-1","bench":"engine/hash_key","metric":"throughput","value":47057029.652,"unit":"ops/s","cores":8}
+{"ts":1787414259,"phase":"opt-1","bench":"engine/tag_match","metric":"throughput","value":658658110.134,"unit":"matches/s","cores":8}
+{"ts":1787414259,"phase":"opt-1","bench":"engine/lookup_miss_dram","metric":"throughput","value":4057018.625,"unit":"ops/s","cores":8}
+{"ts":1787414804,"phase":"1-final","bench":"engine/get_hit_llc","metric":"throughput","value":3899624.212,"unit":"ops/s","cores":8}
+{"ts":1787414804,"phase":"1-final","bench":"engine/get_hit_llc_ref","metric":"throughput","value":4073069.671,"unit":"ops/s (zero-copy)","cores":8}
+{"ts":1787414804,"phase":"1-final","bench":"engine/get_hit_dram","metric":"throughput","value":1763127.007,"unit":"ops/s","cores":8}
+{"ts":1787414804,"phase":"1-final","bench":"engine/get_hit_dram_ref","metric":"throughput","value":3477871.480,"unit":"ops/s (zero-copy)","cores":8}
+{"ts":1787414804,"phase":"1-final","bench":"engine/set_replace","metric":"throughput","value":2002221.830,"unit":"ops/s","cores":8}
+{"ts":1787414804,"phase":"1-final","bench":"engine/ttl_read","metric":"throughput","value":3695862.021,"unit":"ops/s","cores":8}
+{"ts":1787414804,"phase":"1-final","bench":"engine/get_hit_4r1w","metric":"throughput","value":12911239.000,"unit":"ops/s","cores":8}
+{"ts":1787414804,"phase":"1-final","bench":"engine/get_hit_4r1w","metric":"seqlock_retries","value":242.000,"unit":"count","cores":8}
+{"ts":1787414804,"phase":"1-final","bench":"engine/sweep","metric":"throughput","value":638643.075,"unit":"ticks/s (idle wheel)","cores":8}
+{"ts":1787414804,"phase":"1-final","bench":"engine/wheel_expire","metric":"throughput","value":198860.173,"unit":"expirations/s","cores":8}
+{"ts":1787414804,"phase":"1-final","bench":"engine/hash_key","metric":"throughput","value":57746447.394,"unit":"ops/s","cores":8}
+{"ts":1787414804,"phase":"1-final","bench":"engine/tag_match","metric":"throughput","value":819484564.309,"unit":"matches/s","cores":8}
+{"ts":1787414804,"phase":"1-final","bench":"engine/mem_latency_l1_16k","metric":"load_ns","value":1.942,"unit":"ns/dependent-load","cores":8}
+{"ts":1787414804,"phase":"1-final","bench":"engine/mem_latency_l2_256k","metric":"load_ns","value":13.936,"unit":"ns/dependent-load","cores":8}
+{"ts":1787414804,"phase":"1-final","bench":"engine/mem_latency_llc_8m","metric":"load_ns","value":214.054,"unit":"ns/dependent-load","cores":8}
+{"ts":1787414804,"phase":"1-final","bench":"engine/mem_latency_dram_256m","metric":"load_ns","value":300.712,"unit":"ns/dependent-load","cores":8}
+{"ts":1787414804,"phase":"1-final","bench":"engine/lookup_miss_dram","metric":"throughput","value":4348456.845,"unit":"ops/s","cores":8}
+{"ts":1787414804,"phase":"1-final","bench":"server/ping_rtt","metric":"p50_us","value":19.300,"unit":"µs","cores":8}
+{"ts":1787414804,"phase":"1-final","bench":"server/ping_rtt","metric":"p99_us","value":106.900,"unit":"µs","cores":8}
+{"ts":1787414804,"phase":"1-final","bench":"server/ping_rtt","metric":"p99.9_us","value":424.300,"unit":"µs","cores":8}
+{"ts":1787414804,"phase":"1-final","bench":"server/pipeline_set","metric":"throughput","value":883780.787,"unit":"ops/s","cores":8}
+{"ts":1787414804,"phase":"1-final","bench":"server/pipeline_get","metric":"throughput","value":877053.457,"unit":"ops/s","cores":8}
+{"ts":1787414804,"phase":"1-final","bench":"sim/policy_lru","metric":"throughput","value":15341776.424,"unit":"ops/s","cores":8}
+{"ts":1787414804,"phase":"1-final","bench":"sim/policy_lru","metric":"hit_ratio","value":0.766,"unit":"ratio","cores":8}
+{"ts":1787414804,"phase":"1-final","bench":"sim/policy_belady","metric":"throughput","value":497193.838,"unit":"ops/s","cores":8}
+{"ts":1787414804,"phase":"1-final","bench":"sim/policy_belady","metric":"hit_ratio","value":0.874,"unit":"ratio","cores":8}
+{"ts":1787415525,"phase":"3","bench":"engine/get_hit_llc","metric":"throughput","value":1605789.332,"unit":"ops/s","cores":8}
+{"ts":1787415525,"phase":"3","bench":"engine/get_hit_llc_ref","metric":"throughput","value":1150743.489,"unit":"ops/s (zero-copy)","cores":8}
+{"ts":1787415525,"phase":"3","bench":"engine/get_hit_dram","metric":"throughput","value":718968.882,"unit":"ops/s","cores":8}
+{"ts":1787415525,"phase":"3","bench":"engine/get_hit_dram_ref","metric":"throughput","value":1030194.129,"unit":"ops/s (zero-copy)","cores":8}
+{"ts":1787415525,"phase":"3","bench":"engine/set_replace","metric":"throughput","value":1165696.887,"unit":"ops/s","cores":8}
+{"ts":1787415525,"phase":"3","bench":"engine/ttl_read","metric":"throughput","value":1215153.501,"unit":"ops/s","cores":8}
+{"ts":1787415525,"phase":"3","bench":"engine/get_hit_4r1w","metric":"throughput","value":2285569.500,"unit":"ops/s","cores":8}
+{"ts":1787415525,"phase":"3","bench":"engine/get_hit_4r1w","metric":"seqlock_retries","value":6.000,"unit":"count","cores":8}
+{"ts":1787415525,"phase":"3","bench":"engine/sweep","metric":"throughput","value":239407.308,"unit":"ticks/s (idle wheel)","cores":8}
+{"ts":1787415525,"phase":"3","bench":"engine/wheel_expire","metric":"throughput","value":198118.430,"unit":"expirations/s","cores":8}
+{"ts":1787415525,"phase":"3","bench":"engine/hash_key","metric":"throughput","value":26229685.749,"unit":"ops/s","cores":8}
+{"ts":1787415525,"phase":"3","bench":"engine/tag_match","metric":"throughput","value":249738007.385,"unit":"matches/s","cores":8}
+{"ts":1787415525,"phase":"3","bench":"engine/mem_latency_l1_16k","metric":"load_ns","value":9.166,"unit":"ns/dependent-load","cores":8}
+{"ts":1787415525,"phase":"3","bench":"engine/mem_latency_l2_256k","metric":"load_ns","value":17.609,"unit":"ns/dependent-load","cores":8}
+{"ts":1787415525,"phase":"3","bench":"engine/mem_latency_llc_8m","metric":"load_ns","value":227.403,"unit":"ns/dependent-load","cores":8}
+{"ts":1787415525,"phase":"3","bench":"engine/mem_latency_dram_256m","metric":"load_ns","value":691.159,"unit":"ns/dependent-load","cores":8}
+{"ts":1787415525,"phase":"3","bench":"engine/lookup_miss_dram","metric":"throughput","value":1135730.485,"unit":"ops/s","cores":8}
+{"ts":1787415582,"phase":"3","bench":"engine/get_hit_llc","metric":"throughput","value":2391401.162,"unit":"ops/s","cores":8}
+{"ts":1787415582,"phase":"3","bench":"engine/get_hit_llc_ref","metric":"throughput","value":3252697.793,"unit":"ops/s (zero-copy)","cores":8}
+{"ts":1787415582,"phase":"3","bench":"engine/get_hit_dram","metric":"throughput","value":3287665.863,"unit":"ops/s","cores":8}
+{"ts":1787415582,"phase":"3","bench":"engine/get_hit_dram_ref","metric":"throughput","value":4701390.635,"unit":"ops/s (zero-copy)","cores":8}
+{"ts":1787415582,"phase":"3","bench":"engine/set_replace","metric":"throughput","value":2945264.537,"unit":"ops/s","cores":8}
+{"ts":1787415582,"phase":"3","bench":"engine/ttl_read","metric":"throughput","value":2865456.254,"unit":"ops/s","cores":8}
+{"ts":1787415582,"phase":"3","bench":"engine/get_hit_4r1w","metric":"throughput","value":12262504.500,"unit":"ops/s","cores":8}
+{"ts":1787415582,"phase":"3","bench":"engine/get_hit_4r1w","metric":"seqlock_retries","value":298.000,"unit":"count","cores":8}
+{"ts":1787415582,"phase":"3","bench":"engine/sweep","metric":"throughput","value":523559.571,"unit":"ticks/s (idle wheel)","cores":8}
+{"ts":1787415582,"phase":"3","bench":"engine/wheel_expire","metric":"throughput","value":200611.665,"unit":"expirations/s","cores":8}
+{"ts":1787415582,"phase":"3","bench":"engine/hash_key","metric":"throughput","value":65027525.475,"unit":"ops/s","cores":8}
+{"ts":1787415582,"phase":"3","bench":"engine/tag_match","metric":"throughput","value":900640338.968,"unit":"matches/s","cores":8}
+{"ts":1787415582,"phase":"3","bench":"engine/mem_latency_l1_16k","metric":"load_ns","value":1.487,"unit":"ns/dependent-load","cores":8}
+{"ts":1787415582,"phase":"3","bench":"engine/mem_latency_l2_256k","metric":"load_ns","value":3.975,"unit":"ns/dependent-load","cores":8}
+{"ts":1787415582,"phase":"3","bench":"engine/mem_latency_llc_8m","metric":"load_ns","value":131.371,"unit":"ns/dependent-load","cores":8}
+{"ts":1787415582,"phase":"3","bench":"engine/mem_latency_dram_256m","metric":"load_ns","value":181.140,"unit":"ns/dependent-load","cores":8}
+{"ts":1787415582,"phase":"3","bench":"engine/lookup_miss_dram","metric":"throughput","value":5166811.179,"unit":"ops/s","cores":8}
+{"ts":1787415622,"phase":"3","bench":"engine/get_hit_llc","metric":"throughput","value":2298548.148,"unit":"ops/s","cores":8}
+{"ts":1787415622,"phase":"3","bench":"engine/get_hit_llc_ref","metric":"throughput","value":2872140.014,"unit":"ops/s (zero-copy)","cores":8}
+{"ts":1787415622,"phase":"3","bench":"engine/get_hit_dram","metric":"throughput","value":1562435.221,"unit":"ops/s","cores":8}
+{"ts":1787415622,"phase":"3","bench":"engine/get_hit_dram_ref","metric":"throughput","value":2445499.159,"unit":"ops/s (zero-copy)","cores":8}
+{"ts":1787415622,"phase":"3","bench":"engine/set_replace","metric":"throughput","value":3275728.011,"unit":"ops/s","cores":8}
+{"ts":1787415622,"phase":"3","bench":"engine/ttl_read","metric":"throughput","value":2246890.767,"unit":"ops/s","cores":8}
+{"ts":1787415622,"phase":"3","bench":"engine/get_hit_4r1w","metric":"throughput","value":7334354.500,"unit":"ops/s","cores":8}
+{"ts":1787415622,"phase":"3","bench":"engine/get_hit_4r1w","metric":"seqlock_retries","value":206.000,"unit":"count","cores":8}
+{"ts":1787415622,"phase":"3","bench":"engine/sweep","metric":"throughput","value":142138.687,"unit":"ticks/s (idle wheel)","cores":8}
+{"ts":1787415622,"phase":"3","bench":"engine/wheel_expire","metric":"throughput","value":200279.831,"unit":"expirations/s","cores":8}
+{"ts":1787415622,"phase":"3","bench":"engine/hash_key","metric":"throughput","value":44719257.696,"unit":"ops/s","cores":8}
+{"ts":1787415622,"phase":"3","bench":"engine/tag_match","metric":"throughput","value":657480476.700,"unit":"matches/s","cores":8}
+{"ts":1787415622,"phase":"3","bench":"engine/mem_latency_l1_16k","metric":"load_ns","value":1.613,"unit":"ns/dependent-load","cores":8}
+{"ts":1787415622,"phase":"3","bench":"engine/mem_latency_l2_256k","metric":"load_ns","value":4.032,"unit":"ns/dependent-load","cores":8}
+{"ts":1787415622,"phase":"3","bench":"engine/mem_latency_llc_8m","metric":"load_ns","value":103.140,"unit":"ns/dependent-load","cores":8}
+{"ts":1787415622,"phase":"3","bench":"engine/mem_latency_dram_256m","metric":"load_ns","value":409.481,"unit":"ns/dependent-load","cores":8}
+{"ts":1787415622,"phase":"3","bench":"engine/lookup_miss_dram","metric":"throughput","value":4756945.620,"unit":"ops/s","cores":8}
+{"ts":1787415689,"phase":"3","bench":"engine/get_hit_llc","metric":"throughput","value":2404011.980,"unit":"ops/s","cores":8}
+{"ts":1787415689,"phase":"3","bench":"engine/get_hit_llc_ref","metric":"throughput","value":2695043.758,"unit":"ops/s (zero-copy)","cores":8}
+{"ts":1787415689,"phase":"3","bench":"engine/get_hit_dram","metric":"throughput","value":2190580.390,"unit":"ops/s","cores":8}
+{"ts":1787415689,"phase":"3","bench":"engine/get_hit_dram_ref","metric":"throughput","value":3470811.904,"unit":"ops/s (zero-copy)","cores":8}
+{"ts":1787415689,"phase":"3","bench":"engine/set_replace","metric":"throughput","value":2340248.795,"unit":"ops/s","cores":8}
+{"ts":1787415689,"phase":"3","bench":"engine/ttl_read","metric":"throughput","value":2992791.069,"unit":"ops/s","cores":8}
+{"ts":1787415689,"phase":"3","bench":"engine/get_hit_4r1w","metric":"throughput","value":12344699.500,"unit":"ops/s","cores":8}
+{"ts":1787415689,"phase":"3","bench":"engine/get_hit_4r1w","metric":"seqlock_retries","value":298.000,"unit":"count","cores":8}
+{"ts":1787415689,"phase":"3","bench":"engine/sweep","metric":"throughput","value":602796.814,"unit":"ticks/s (idle wheel)","cores":8}
+{"ts":1787415689,"phase":"3","bench":"engine/wheel_expire","metric":"throughput","value":203920.619,"unit":"expirations/s","cores":8}
+{"ts":1787415689,"phase":"3","bench":"engine/hash_key","metric":"throughput","value":51306859.477,"unit":"ops/s","cores":8}
+{"ts":1787415689,"phase":"3","bench":"engine/tag_match","metric":"throughput","value":852270293.386,"unit":"matches/s","cores":8}
+{"ts":1787415689,"phase":"3","bench":"engine/epoch_pin","metric":"cost_ns","value":4.969,"unit":"ns/pin-unpair","cores":8}
+{"ts":1787415689,"phase":"3","bench":"engine/mem_latency_l1_16k","metric":"load_ns","value":1.565,"unit":"ns/dependent-load","cores":8}
+{"ts":1787415689,"phase":"3","bench":"engine/mem_latency_l2_256k","metric":"load_ns","value":13.525,"unit":"ns/dependent-load","cores":8}
+{"ts":1787415689,"phase":"3","bench":"engine/mem_latency_llc_8m","metric":"load_ns","value":158.395,"unit":"ns/dependent-load","cores":8}
+{"ts":1787415689,"phase":"3","bench":"engine/mem_latency_dram_256m","metric":"load_ns","value":237.452,"unit":"ns/dependent-load","cores":8}
+{"ts":1787415689,"phase":"3","bench":"engine/lookup_miss_dram","metric":"throughput","value":4682972.409,"unit":"ops/s","cores":8}
+{"ts":1787481259,"phase":"0-1","bench":"engine/get_hit_llc","metric":"throughput","value":2190240.568,"unit":"ops/s","cores":8}
+{"ts":1787481259,"phase":"0-1","bench":"engine/get_hit_llc_ref","metric":"throughput","value":6454057.725,"unit":"ops/s (zero-copy)","cores":8}
+{"ts":1787481259,"phase":"0-1","bench":"engine/get_hit_dram","metric":"throughput","value":2890481.354,"unit":"ops/s","cores":8}
+{"ts":1787481259,"phase":"0-1","bench":"engine/get_hit_dram_ref","metric":"throughput","value":4913692.987,"unit":"ops/s (zero-copy)","cores":8}
+{"ts":1787481259,"phase":"0-1","bench":"engine/set_replace","metric":"throughput","value":4890985.070,"unit":"ops/s","cores":8}
+{"ts":1787481259,"phase":"0-1","bench":"engine/ttl_read","metric":"throughput","value":3453613.459,"unit":"ops/s","cores":8}
+{"ts":1787481259,"phase":"0-1","bench":"engine/get_hit_4r1w","metric":"throughput","value":12437961.000,"unit":"ops/s","cores":8}
+{"ts":1787481259,"phase":"0-1","bench":"engine/get_hit_4r1w","metric":"seqlock_retries","value":198.000,"unit":"count","cores":8}
+{"ts":1787481259,"phase":"0-1","bench":"engine/sweep","metric":"throughput","value":676413.193,"unit":"ticks/s (idle wheel)","cores":8}
+{"ts":1787481259,"phase":"0-1","bench":"engine/wheel_expire","metric":"throughput","value":196840.590,"unit":"expirations/s","cores":8}
+{"ts":1787481259,"phase":"0-1","bench":"engine/hash_key","metric":"throughput","value":61216706.783,"unit":"ops/s","cores":8}
+{"ts":1787481259,"phase":"0-1","bench":"engine/tag_match","metric":"throughput","value":1034949169.010,"unit":"matches/s","cores":8}
+{"ts":1787481259,"phase":"0-1","bench":"engine/epoch_pin","metric":"cost_ns","value":4.079,"unit":"ns/pin-unpair","cores":8}
+{"ts":1787481259,"phase":"0-1","bench":"engine/l0_sprint_hit","metric":"cost_ns","value":68.635,"unit":"ns/op","cores":8}
+{"ts":1787481259,"phase":"0-1","bench":"engine/mem_latency_l1_16k","metric":"load_ns","value":1.612,"unit":"ns/dependent-load","cores":8}
+{"ts":1787481259,"phase":"0-1","bench":"engine/mem_latency_l2_256k","metric":"load_ns","value":7.020,"unit":"ns/dependent-load","cores":8}
+{"ts":1787481259,"phase":"0-1","bench":"engine/mem_latency_llc_8m","metric":"load_ns","value":96.810,"unit":"ns/dependent-load","cores":8}
+{"ts":1787481259,"phase":"0-1","bench":"engine/mem_latency_dram_256m","metric":"load_ns","value":160.929,"unit":"ns/dependent-load","cores":8}
+{"ts":1787481259,"phase":"0-1","bench":"engine/lookup_miss_dram","metric":"throughput","value":5608148.817,"unit":"ops/s","cores":8}
+{"ts":1787482580,"phase":"0-1","bench":"engine/get_hit_llc","metric":"throughput","value":7285836.768,"unit":"ops/s","cores":8}
+{"ts":1787482580,"phase":"0-1","bench":"engine/get_hit_llc_ref","metric":"throughput","value":11788026.106,"unit":"ops/s (zero-copy)","cores":8}
+{"ts":1787482580,"phase":"0-1","bench":"engine/get_hit_dram","metric":"throughput","value":2620311.712,"unit":"ops/s","cores":8}
+{"ts":1787482580,"phase":"0-1","bench":"engine/get_hit_dram_ref","metric":"throughput","value":4120058.644,"unit":"ops/s (zero-copy)","cores":8}
+{"ts":1787482580,"phase":"0-1","bench":"engine/set_replace","metric":"throughput","value":4137837.107,"unit":"ops/s","cores":8}
+{"ts":1787482580,"phase":"0-1","bench":"engine/ttl_read","metric":"throughput","value":2862042.793,"unit":"ops/s","cores":8}
+{"ts":1787482580,"phase":"0-1","bench":"engine/get_hit_4r1w","metric":"throughput","value":11915652.000,"unit":"ops/s","cores":8}
+{"ts":1787482580,"phase":"0-1","bench":"engine/get_hit_4r1w","metric":"seqlock_retries","value":23.000,"unit":"count","cores":8}
+{"ts":1787482580,"phase":"0-1","bench":"engine/sweep","metric":"throughput","value":425781.754,"unit":"ticks/s (idle wheel)","cores":8}
+{"ts":1787482580,"phase":"0-1","bench":"engine/wheel_expire","metric":"throughput","value":203208.252,"unit":"expirations/s","cores":8}
+{"ts":1787482580,"phase":"0-1","bench":"engine/hash_key","metric":"throughput","value":55637949.234,"unit":"ops/s","cores":8}
+{"ts":1787482580,"phase":"0-1","bench":"engine/tag_match","metric":"throughput","value":757708724.229,"unit":"matches/s","cores":8}
+{"ts":1787482580,"phase":"0-1","bench":"engine/epoch_pin","metric":"cost_ns","value":5.233,"unit":"ns/pin-unpair","cores":8}
+{"ts":1787482580,"phase":"0-1","bench":"engine/l0_sprint_hit","metric":"cost_ns","value":86.561,"unit":"ns/op","cores":8}
+{"ts":1787482580,"phase":"0-1","bench":"engine/mem_latency_l1_16k","metric":"load_ns","value":1.334,"unit":"ns/dependent-load","cores":8}
+{"ts":1787482580,"phase":"0-1","bench":"engine/mem_latency_l2_256k","metric":"load_ns","value":8.006,"unit":"ns/dependent-load","cores":8}
+{"ts":1787482580,"phase":"0-1","bench":"engine/mem_latency_llc_8m","metric":"load_ns","value":53.270,"unit":"ns/dependent-load","cores":8}
+{"ts":1787482580,"phase":"0-1","bench":"engine/mem_latency_dram_256m","metric":"load_ns","value":187.612,"unit":"ns/dependent-load","cores":8}
+{"ts":1787482580,"phase":"0-1","bench":"engine/lookup_miss_dram","metric":"throughput","value":4870314.769,"unit":"ops/s","cores":8}

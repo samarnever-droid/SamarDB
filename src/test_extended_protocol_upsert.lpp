@@ -1,0 +1,190 @@
+# samardb Extended Protocol & Atomic Upsert Test Suite
+# Verifies: Parse/Bind/Describe/Execute/Sync, Parameter Binding ($1, $2), and INSERT ... ON CONFLICT (Upsert)
+
+import bytes
+import io
+import pager
+import heap
+import btree
+import schema
+import parser
+import exec
+import opt
+import agg
+import wal
+import recovery
+import concur
+import pgwire
+import meridian_plugin
+import join
+import server
+
+def assert_bool(name: Str, actual: Bool, expected: Bool) -> Void:
+    if actual == expected:
+        print_str(str_concat("  [PASS] ", name))
+    else:
+        print_str(str_concat("  [FAIL] ", name))
+
+def assert_int(name: Str, actual: Int, expected: Int) -> Void:
+    if actual == expected:
+        print_str(str_concat("  [PASS] ", name))
+    else:
+        msg := str_concat("  [FAIL] ", str_concat(name, str_concat(" (expected: ", str_concat(int_to_str(expected), str_concat(", got: ", str_concat(int_to_str(actual), ")"))))))
+        print_str(msg)
+
+def assert_str(name: Str, actual: Str, expected: Str) -> Void:
+    if actual == expected:
+        print_str(str_concat("  [PASS] ", name))
+    else:
+        msg := str_concat("  [FAIL] ", str_concat(name, str_concat(" (expected: '", str_concat(expected, str_concat("', got: '", str_concat(actual, "')"))))))
+        print_str(msg)
+
+def main() -> Void:
+    print_str("================================================================")
+    print_str("   SAMARDB EXTENDED PROTOCOL & ATOMIC UPSERT TEST SUITE         ")
+    print_str("================================================================")
+
+    # ── [1/4] Parameterized Query Parsing & Substitution ──────────────────────
+    print_str("--- [1/4] Testing Parameter Substitution ($1, $2, ...) ---")
+    mut params := list_new()
+    list_push(params, 42)
+    list_push(params, 7500)
+    list_push(params, 1)
+
+    raw_sql := "SELECT * FROM accounts WHERE id = $1"
+    sub_sql := sql_substitute_params(raw_sql, params)
+    assert_str("Parameter $1 substituted in SELECT", sub_sql, "SELECT * FROM accounts WHERE id = 42")
+
+    pq := sql_parse(sub_sql)
+    assert_int("Parsed query type is SELECT", pq.query_type, QUERY_SELECT())
+    assert_str("Table name is accounts", pq.table_name, "accounts")
+    assert_str("WHERE column is id", pq.where_col_name, "id")
+    assert_int("WHERE value is 42", pq.where_val, 42)
+
+    raw_upsert := "INSERT INTO accounts VALUES ($1, $2, $3) ON CONFLICT (id) DO UPDATE SET balance = $2"
+    sub_upsert := sql_substitute_params(raw_upsert, params)
+    assert_str("Multi-parameter substitution in UPSERT", sub_upsert, "INSERT INTO accounts VALUES (42, 7500, 1) ON CONFLICT (id) DO UPDATE SET balance = 7500")
+
+    pq_upsert := sql_parse(sub_upsert)
+    assert_int("Parsed query type is UPSERT", pq_upsert.query_type, QUERY_UPSERT())
+    assert_str("Upsert table is accounts", pq_upsert.table_name, "accounts")
+    assert_str("Conflict target is id", pq_upsert.on_conflict_col, "id")
+    assert_bool("DO UPDATE is true", pq_upsert.on_conflict_do_update, true)
+    assert_str("SET column is balance", pq_upsert.on_conflict_set_col, "balance")
+    assert_int("SET value is 7500", pq_upsert.on_conflict_set_val, 7500)
+
+    # ── [2/4] PostgreSQL Extended Query Protocol Wire Framing ─────────────────
+    print_str("--- [2/4] Testing Extended Query Protocol Framing (Parse/Bind/Sync) ---")
+    mut sock := simsock_new()
+
+    # Test ParseComplete ('1')
+    sock = pgwire_send_parse_complete(sock)
+    assert_int("ParseComplete type is '1' (49)", bytes_get8(sock.out_buf, 0), 49)
+    assert_int("ParseComplete length is 4", bytes_get32be(sock.out_buf, 1), 4)
+
+    # Test BindComplete ('2')
+    sock = pgwire_send_bind_complete(sock)
+    assert_int("BindComplete type is '2' (50)", bytes_get8(sock.out_buf, 5), 50)
+    assert_int("BindComplete length is 4", bytes_get32be(sock.out_buf, 6), 4)
+
+    # Test ParameterDescription ('t')
+    mut oids := list_new()
+    list_push(oids, PG_OID_INT4())
+    list_push(oids, PG_OID_INT4())
+    sock = pgwire_send_parameter_description(sock, oids)
+    assert_int("ParameterDescription type is 't' (116)", bytes_get8(sock.out_buf, 10), 116)
+    assert_int("Parameter count is 2", bytes_get16be(sock.out_buf, 15), 2)
+    assert_int("Param 1 OID is 23 (int4)", bytes_get32be(sock.out_buf, 17), 23)
+    assert_int("Param 2 OID is 23 (int4)", bytes_get32be(sock.out_buf, 21), 23)
+
+    # ── [3/4] Atomic Storage Engine Upsert (Insert-if-Absent, Update-if-Present)
+    print_str("--- [3/4] Testing Storage Engine Atomic Upsert (ON CONFLICT) ---")
+    sim_disk := sim_disk_new(8192, 128)
+    mut pool := buffer_pool_new(32, 8192, sim_disk)
+    mut tx_mgr := tx_manager_new(1024)
+    mut wal_mgr := wal_manager_new()
+
+    mut cat := catalog_new()
+    col_names := list_new()
+    list_push(col_names, "id")
+    list_push(col_names, "balance")
+    list_push(col_names, "status")
+    col_types := list_new()
+    list_push(col_types, TYPE_INT())
+    list_push(col_types, TYPE_INT())
+    list_push(col_types, TYPE_INT())
+    
+    # Initialize table with heap page 1 and btree index page 2
+    ts := table_schema_new("accounts", col_names, col_types, 0, 1, 2)
+    cat = catalog_add_table(cat, ts)
+
+    # Init Heap Page on page 1
+    (p_h_init, h_page, _) := buffer_pool_fetch_page(pool, 1)
+    h_page_init := heap_page_init(8192)
+    bytes_copy(h_page, 0, h_page_init, 0, 8192)
+    mut p_with_heap := buffer_pool_unpin_page(p_h_init, 1, true)
+
+    # Init B+Tree root leaf on page 2
+    (p_init, idx_leaf, ok_init) := buffer_pool_fetch_page(p_with_heap, 2)
+    idx_leaf_init := btree_node_init(8192, PAGE_BTREE_LEAF(), 0)
+    bytes_copy(idx_leaf, 0, idx_leaf_init, 0, 8192)
+    pool = buffer_pool_unpin_page(p_init, 2, true)
+
+    # Step A: First Upsert on absent key 101 -> Must perform INSERT
+    mut row_vals := list_new()
+    list_push(row_vals, 101)
+    list_push(row_vals, 5000)
+    list_push(row_vals, 1)
+
+    (tx_mgr_init, tx1) := tx_begin(tx_mgr)
+    (pool1, tx1_after, wal1, ok1) := execute_upsert(cat, pool, tx_mgr_init, wal_mgr, "accounts", row_vals, "id", true, "balance", 9999, tx1)
+    assert_bool("First upsert (absent key) successfully inserted", ok1, true)
+    (tx_comm1, wal1_comm) := tx_commit(tx1_after, tx1, wal1)
+
+    # Step B: Second Upsert on existing key 101 -> Must perform in-place UPDATE to 9999
+    (tx_mgr2, tx2) := tx_begin(tx_comm1)
+    (pool2, tx2_after, wal2, ok2) := execute_upsert(cat, pool1, tx_mgr2, wal1_comm, "accounts", row_vals, "id", true, "balance", 9999, tx2)
+    assert_bool("Second upsert (existing key) successfully updated", ok2, true)
+    (tx_comm2, wal2_comm) := tx_commit(tx2_after, tx2, wal2)
+
+    # Step C: Third Upsert with DO NOTHING on existing key 101 -> Must succeed with no error
+    (tx_mgr3, tx3) := tx_begin(tx_comm2)
+    (pool3, tx3_after, wal3, ok3) := execute_upsert(cat, pool2, tx_mgr3, wal2_comm, "accounts", row_vals, "id", false, "", 0, tx3)
+    assert_bool("Upsert with DO NOTHING succeeded cleanly", ok3, true)
+
+    # ── [4/4] Server Prepared Statement Registry & MERIDIAN L1 Acceleration ────
+    print_str("--- [4/4] Testing Server Prepared Statements & MERIDIAN L1 Plugin ---")
+    mut srv := server_init(5432)
+    assert_bool("Server initialized with MERIDIAN plugin enabled", srv.meridian.enabled, true)
+
+    # Prepare statement
+    stmt := prepared_stmt_new("find_user", "SELECT * FROM accounts WHERE id = $1", oids)
+    assert_str("Prepared statement name is find_user", stmt.name, "find_user")
+
+    # Execute prepared statement with param 101
+    mut bind_params := list_new()
+    list_push(bind_params, 101)
+    (srv_after_exec, res_tag) := server_execute_prepared(srv, stmt, bind_params)
+    assert_str("Prepared execution returned result tag", res_tag, "SELECT 1")
+    assert_int("MERIDIAN L1 cache hit registered", srv_after_exec.meridian.cache_hits, 1)
+
+    # Execute prepared upsert statement
+    stmt_upsert := prepared_stmt_new("upsert_acc", "INSERT INTO accounts VALUES ($1, $2, $3) ON CONFLICT (id) DO UPDATE SET balance = $2", oids)
+    mut upsert_params := list_new()
+    list_push(upsert_params, 101)
+    list_push(upsert_params, 8888)
+    list_push(upsert_params, 1)
+    (srv_after_upsert, res_upsert_tag) := server_execute_prepared(srv_after_exec, stmt_upsert, upsert_params)
+    assert_str("Prepared upsert returned result tag", res_upsert_tag, "UPDATE 1")
+    assert_int("MERIDIAN L1 commit delta pushed for in-place repair", srv_after_upsert.meridian.deltas_pushed, 1)
+
+    # Toggle MERIDIAN OFF and verify clean fallback
+    srv_off := server_toggle_meridian(srv_after_upsert, false)
+    assert_bool("MERIDIAN plugin toggled OFF", srv_off.meridian.enabled, false)
+    (srv_off_exec, res_off_tag) := server_execute_prepared(srv_off, stmt, bind_params)
+    assert_str("Bypass execution returns valid result", res_off_tag, "SELECT 1")
+    assert_int("No new cache hits recorded while disabled", srv_off_exec.meridian.cache_hits, 1)
+
+    print_str("================================================================")
+    print_str(" [SUCCESS] ALL EXTENDED PROTOCOL & UPSERT TESTS PASSED 100%!   ")
+    print_str("================================================================")

@@ -368,3 +368,149 @@ def pgwire_handle_query_result(
     # Fallback: error
     mut s := pgwire_send_error(sock, "Unsupported query type")
     return pgwire_send_ready_for_query(s, 73)
+
+# ── PostgreSQL Extended Query Protocol Constants ───────────────────────────────
+def PG_MSG_PARSE() -> Int:
+    return 80  # 'P'
+
+def PG_MSG_BIND() -> Int:
+    return 66  # 'B'
+
+def PG_MSG_DESCRIBE() -> Int:
+    return 68  # 'D'
+
+def PG_MSG_EXECUTE() -> Int:
+    return 69  # 'E'
+
+def PG_MSG_SYNC() -> Int:
+    return 83  # 'S'
+
+def PG_MSG_CLOSE() -> Int:
+    return 67  # 'C'
+
+def PG_MSG_PARSE_COMPLETE() -> Int:
+    return 49  # '1'
+
+def PG_MSG_BIND_COMPLETE() -> Int:
+    return 50  # '2'
+
+def PG_MSG_CLOSE_COMPLETE() -> Int:
+    return 51  # '3'
+
+def PG_MSG_PARAMETER_DESCRIPTION() -> Int:
+    return 116  # 't'
+
+def PG_MSG_NO_DATA() -> Int:
+    return 110  # 'n'
+
+# ── Extended Protocol Server Encoders ──────────────────────────────────────────
+def pgwire_send_parse_complete(sock: SimSocket) -> SimSocket:
+    mut s := pgwire_write_byte(sock, 49) # '1'
+    return pgwire_write_int32be(s, 4)
+
+def pgwire_send_bind_complete(sock: SimSocket) -> SimSocket:
+    mut s := pgwire_write_byte(sock, 50) # '2'
+    return pgwire_write_int32be(s, 4)
+
+def pgwire_send_close_complete(sock: SimSocket) -> SimSocket:
+    mut s := pgwire_write_byte(sock, 51) # '3'
+    return pgwire_write_int32be(s, 4)
+
+def pgwire_send_no_data(sock: SimSocket) -> SimSocket:
+    mut s := pgwire_write_byte(sock, 110) # 'n'
+    return pgwire_write_int32be(s, 4)
+
+def pgwire_send_parameter_description(sock: SimSocket, param_oids: List[Int]) -> SimSocket:
+    n := len(param_oids)
+    msg_len := 4 + 2 + n * 4
+    mut s := pgwire_write_byte(sock, 116) # 't'
+    s = pgwire_write_int32be(s, msg_len)
+    s = pgwire_write_int16be(s, n)
+    mut i := 0
+    while i < n:
+        s = pgwire_write_int32be(s, param_oids[i])
+        i = i + 1
+    return s
+
+# ── Extended Protocol Client Decoders ──────────────────────────────────────────
+def pgwire_read_parse(sock: SimSocket) -> Tuple[SimSocket, Str, Str, List[Int]]:
+    (s1, msg_len) := pgwire_read_int32be(sock)
+    (s2, stmt_name) := pgwire_read_str(s1)
+    (s3, query_str) := pgwire_read_str(s2)
+    (s4, num_params) := pgwire_read_int16be(s3)
+    mut param_oids := list_new()
+    mut cur_s := s4
+    mut i := 0
+    while i < num_params:
+        (s_next, oid) := pgwire_read_int32be(cur_s)
+        list_push(param_oids, oid)
+        cur_s = s_next
+        i = i + 1
+    return (cur_s, stmt_name, query_str, param_oids)
+
+def pgwire_read_bind(sock: SimSocket) -> Tuple[SimSocket, Str, Str, List[Int]]:
+    (s1, msg_len) := pgwire_read_int32be(sock)
+    (s2, portal_name) := pgwire_read_str(s1)
+    (s3, stmt_name) := pgwire_read_str(s2)
+    (s4, num_format_codes) := pgwire_read_int16be(s3)
+    mut cur_s := s4
+    mut fi := 0
+    while fi < num_format_codes:
+        (s_next, code) := pgwire_read_int16be(cur_s)
+        cur_s = s_next
+        fi = fi + 1
+    (s5, num_params) := pgwire_read_int16be(cur_s)
+    mut cur_s2 := s5
+    mut param_values := list_new()
+    mut pi := 0
+    while pi < num_params:
+        (s_len, val_len) := pgwire_read_int32be(cur_s2)
+        if val_len == -1:
+            list_push(param_values, 0)
+            cur_s2 = s_len
+        elif val_len == 4:
+            (s_val, int_val) := pgwire_read_int32be(s_len)
+            list_push(param_values, int_val)
+            cur_s2 = s_val
+        else:
+            mut acc_val := 0
+            mut is_neg := false
+            mut bi := 0
+            mut cur_byte_s := s_len
+            while bi < val_len:
+                (s_b, b) := pgwire_read_byte(cur_byte_s)
+                if b == 45:
+                    is_neg = true
+                elif b >= 48 && b <= 57:
+                    acc_val = acc_val * 10 + (b - 48)
+                cur_byte_s = s_b
+                bi = bi + 1
+            if is_neg:
+                acc_val = 0 - acc_val
+            list_push(param_values, acc_val)
+            cur_s2 = cur_byte_s
+        pi = pi + 1
+    (s6, num_result_formats) := pgwire_read_int16be(cur_s2)
+    mut cur_s3 := s6
+    mut rfi := 0
+    while rfi < num_result_formats:
+        (s_next_rf, rf_code) := pgwire_read_int16be(cur_s3)
+        cur_s3 = s_next_rf
+        rfi = rfi + 1
+    return (cur_s3, portal_name, stmt_name, param_values)
+
+def pgwire_read_describe(sock: SimSocket) -> Tuple[SimSocket, Int, Str]:
+    (s1, msg_len) := pgwire_read_int32be(sock)
+    (s2, target_type) := pgwire_read_byte(s1)
+    (s3, name) := pgwire_read_str(s2)
+    return (s3, target_type, name)
+
+def pgwire_read_execute(sock: SimSocket) -> Tuple[SimSocket, Str, Int]:
+    (s1, msg_len) := pgwire_read_int32be(sock)
+    (s2, portal_name) := pgwire_read_str(s1)
+    (s3, max_rows) := pgwire_read_int32be(s2)
+    return (s3, portal_name, max_rows)
+
+def pgwire_read_sync(sock: SimSocket) -> Tuple[SimSocket, Bool]:
+    (s1, msg_len) := pgwire_read_int32be(sock)
+    return (s1, true)

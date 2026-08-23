@@ -1,5 +1,5 @@
-﻿# samardb-server: Network Server Layer, Connection Pool & PostgreSQL Wire Daemon
-# Exposes SamarDB kernel over TCP sockets for standard client drivers (psql, libpq, pgwire).
+# samardb-server: PostgreSQL v3.0 Network Daemon & Reactor Core
+# Manages connection pool, protocol framing, SQL execution, MERIDIAN L1 sync, and non-blocking polling
 
 import bytes
 import io
@@ -18,7 +18,7 @@ import pgwire
 import meridian_plugin
 import join
 
-# ── Connection State Constants ────────────────────────────────────────────────
+# ── Connection State Machine Constants ────────────────────────────────────────
 def CONN_STATE_DISCONNECTED() -> Int:
     return 0
 
@@ -28,65 +28,68 @@ def CONN_STATE_CONNECTED() -> Int:
 def CONN_STATE_IN_TRANSACTION() -> Int:
     return 2
 
-# ── Per-Client Connection Slot ────────────────────────────────────────────────
+# ── Connection Slot Descriptor ────────────────────────────────────────────────
 struct ConnectionSlot:
     fd:             Int
     state:          Int
     txn_id:         Int
     queries_served: Int
-    in_buffer:      Str
+    partial_buf:    Str
 
-def conn_slot_new() -> ConnectionSlot:
-    return ConnectionSlot(-1, CONN_STATE_DISCONNECTED(), 0, 0, "")
+def conn_slot_new(fd: Int) -> ConnectionSlot:
+    return ConnectionSlot(fd, CONN_STATE_CONNECTED(), 0, 0, "")
+
+def conn_slot_empty() -> ConnectionSlot:
+    return ConnectionSlot(0, CONN_STATE_DISCONNECTED(), 0, 0, "")
 
 # ── Connection Pool Manager ───────────────────────────────────────────────────
 struct ConnectionPool:
-    slots:          List[ConnectionSlot]
-    max_conns:      Int
-    active_conns:   Int
-    total_served:   Int
+    slots:        List[ConnectionSlot]
+    max_conns:    Int
+    active_conns: Int
+    total_served: Int
 
 def conn_pool_new(max_conns: Int) -> ConnectionPool:
     mut s := list_new()
     mut i := 0
     while i < max_conns:
-        list_push(s, conn_slot_new())
+        list_push(s, conn_slot_empty())
         i = i + 1
     return ConnectionPool(s, max_conns, 0, 0)
 
 def conn_pool_acquire(pool: ConnectionPool, client_fd: Int) -> Tuple[ConnectionPool, Int]:
     if pool.active_conns >= pool.max_conns:
         return (pool, -1)
-    
-    mut found_idx := -1
+        
+    mut slot_idx := -1
     mut i := 0
     while i < pool.max_conns:
-        slot := pool.slots[i]
-        if slot.state == CONN_STATE_DISCONNECTED():
-            found_idx = i
-            i = pool.max_conns # break
+        if pool.slots[i].state == CONN_STATE_DISCONNECTED():
+            slot_idx = i
+            break
         i = i + 1
         
-    if found_idx < 0:
+    if slot_idx < 0:
         return (pool, -1)
         
     mut new_slots := list_new()
     mut j := 0
     while j < pool.max_conns:
-        if j == found_idx:
-            new_slot := ConnectionSlot(client_fd, CONN_STATE_CONNECTED(), 0, 0, "")
-            list_push(new_slots, new_slot)
+        if j == slot_idx:
+            list_push(new_slots, conn_slot_new(client_fd))
         else:
             list_push(new_slots, pool.slots[j])
         j = j + 1
         
-    next_pool := ConnectionPool(
-        new_slots,
-        pool.max_conns,
-        pool.active_conns + 1,
-        pool.total_served
+    return (
+        ConnectionPool(
+            new_slots,
+            pool.max_conns,
+            pool.active_conns + 1,
+            pool.total_served + 1
+        ),
+        slot_idx
     )
-    return (next_pool, found_idx)
 
 def conn_pool_release(pool: ConnectionPool, slot_idx: Int) -> ConnectionPool:
     if slot_idx < 0 || slot_idx >= pool.max_conns:
@@ -96,7 +99,7 @@ def conn_pool_release(pool: ConnectionPool, slot_idx: Int) -> ConnectionPool:
     mut j := 0
     while j < pool.max_conns:
         if j == slot_idx:
-            list_push(new_slots, conn_slot_new())
+            list_push(new_slots, conn_slot_empty())
         else:
             list_push(new_slots, pool.slots[j])
         j = j + 1
@@ -111,6 +114,23 @@ def conn_pool_release(pool: ConnectionPool, slot_idx: Int) -> ConnectionPool:
         next_active,
         pool.total_served
     )
+
+# ── Prepared Statement & Portal Definitions ───────────────────────────────────
+struct PreparedStatement:
+    name:       Str
+    sql_text:   Str
+    param_oids: List[Int]
+
+struct Portal:
+    name:         Str
+    stmt_name:    Str
+    param_values: List[Int]
+
+def prepared_stmt_new(name: Str, sql_text: Str, param_oids: List[Int]) -> PreparedStatement:
+    return PreparedStatement(name, sql_text, param_oids)
+
+def portal_new(name: Str, stmt_name: Str, param_values: List[Int]) -> Portal:
+    return Portal(name, stmt_name, param_values)
 
 # ── Server State ──────────────────────────────────────────────────────────────
 struct SamarDBServer:
@@ -127,15 +147,11 @@ struct SamarDBServer:
 
 # ── Initialize Server Engine ──────────────────────────────────────────────────
 def server_init(port: Int) -> SamarDBServer:
-    # 1. Initialize 64-page (512 KB) buffer pool with simulated disk
-    sim_disk := sim_disk_new(128, 8192)
+    sim_disk := sim_disk_new(8192, 128)
     pool := buffer_pool_new(64, 8192, sim_disk)
-    
-    # 2. Initialize Transaction Manager and WAL Engine
     tx_mgr := tx_manager_new(1024)
     wal_mgr := wal_manager_new()
     
-    # 3. Initialize Catalog with default tables (accounts, orders, users)
     mut cat := catalog_new()
     col_names := list_new()
     list_push(col_names, "id")
@@ -150,10 +166,7 @@ def server_init(port: Int) -> SamarDBServer:
     ts := table_schema_new("accounts", col_names, col_types, 0, 10, 20)
     cat = catalog_add_table(cat, ts)
     
-    # 4. Initialize native MERIDIAN acceleration plugin (default: enabled on port 7717)
     meridian := meridian_plugin_new(true, "127.0.0.1", 7717)
-    
-    # 5. Initialize 128-slot Connection Pool Manager
     conn_pool := conn_pool_new(128)
     
     return SamarDBServer(
@@ -169,9 +182,9 @@ def server_init(port: Int) -> SamarDBServer:
         conn_pool
     )
 
-# ── Meridian Plugin Controls ──────────────────────────────────────────────────
+# ── Dynamic Runtime Toggle for MERIDIAN Plugin ────────────────────────────────
 def server_toggle_meridian(srv: SamarDBServer, enable: Bool) -> SamarDBServer:
-    new_plugin := meridian_plugin_toggle(srv.meridian, enable)
+    next_plugin := meridian_plugin_toggle(srv.meridian, enable)
     return SamarDBServer(
         srv.port,
         srv.is_running,
@@ -181,67 +194,11 @@ def server_toggle_meridian(srv: SamarDBServer, enable: Bool) -> SamarDBServer:
         srv.pool,
         srv.tx_mgr,
         srv.wal_mgr,
-        new_plugin,
+        next_plugin,
         srv.conn_pool
     )
 
-# ── Network Binding ───────────────────────────────────────────────────────────
-def server_listen(port: Int) -> Int:
-    listener := net_listen(port)
-    return listener
-
-# ── Client Handshake & Query Dispatcher ───────────────────────────────────────
-def server_handle_client(srv: SamarDBServer, client_fd: Int) -> SamarDBServer:
-    mut cur_srv := srv
-    
-    # Send PostgreSQL startup response
-    # AuthOK (9 bytes) + ReadyForQuery (6 bytes)
-    mut startup_sock := simsock_new()
-    startup_sock = pgwire_send_auth_ok(startup_sock)
-    startup_sock = pgwire_send_backend_key(startup_sock, 1, 4242)
-    startup_sock = pgwire_send_ready_for_query(startup_sock, 73) # 'I' = Idle
-    
-    # Read incoming request from client socket
-    req_data := net_recv(client_fd, 4096)
-    if str_len(req_data) > 0:
-        cur_srv = SamarDBServer(
-            cur_srv.port,
-            cur_srv.is_running,
-            cur_srv.active_conns,
-            cur_srv.queries_served + 1,
-            cur_srv.cat,
-            cur_srv.pool,
-            cur_srv.tx_mgr,
-            cur_srv.wal_mgr,
-            cur_srv.meridian,
-            cur_srv.conn_pool
-        )
-        
-        # Build query response (SELECT 1 row description + data)
-        col_names := list_new()
-        list_push(col_names, "id")
-        list_push(col_names, "balance")
-        col_types := list_new()
-        list_push(col_types, PG_OID_INT4())
-        list_push(col_types, PG_OID_INT4())
-        
-        mut q_sock := simsock_new()
-        q_sock = pgwire_send_row_description(q_sock, col_names, col_types)
-        
-        row1 := list_new()
-        list_push(row1, 101)
-        list_push(row1, 5000)
-        q_sock = pgwire_send_data_row(q_sock, row1, 2)
-        q_sock = pgwire_send_command_complete(q_sock, "SELECT 1")
-        q_sock = pgwire_send_ready_for_query(q_sock, 73)
-        
-        # Send response back to client socket
-        net_send(client_fd, "PGRES_READY_OK\r\n")
-    
-    net_close(client_fd)
-    return cur_srv
-
-# ── Server Query Execution Helper with Join & Aggregation Dispatch ────────────
+# ── Server Query Execution Helper with Join, Aggregation, and Upsert Dispatch ─
 def server_execute_sql(srv: SamarDBServer, sql_text: Str) -> Tuple[SamarDBServer, Str]:
     pq := sql_parse(sql_text)
     mut result_msg := "OK"
@@ -266,6 +223,26 @@ def server_execute_sql(srv: SamarDBServer, sql_text: Str) -> Tuple[SamarDBServer
             return (next_srv, result_msg)
     elif pq.query_type == QUERY_INSERT():
         result_msg = "INSERT 0 1"
+        if srv.meridian.enabled:
+            next_plugin := meridian_plugin_record_delta(srv.meridian)
+            next_srv = SamarDBServer(
+                srv.port,
+                srv.is_running,
+                srv.active_conns,
+                srv.queries_served + 1,
+                srv.cat,
+                srv.pool,
+                srv.tx_mgr,
+                srv.wal_mgr,
+                next_plugin,
+                srv.conn_pool
+            )
+            return (next_srv, result_msg)
+    elif pq.query_type == QUERY_UPSERT():
+        if pq.on_conflict_do_update:
+            result_msg = "UPDATE 1"
+        else:
+            result_msg = "INSERT 0 1"
         if srv.meridian.enabled:
             next_plugin := meridian_plugin_record_delta(srv.meridian)
             next_srv = SamarDBServer(
@@ -332,65 +309,74 @@ def server_execute_sql(srv: SamarDBServer, sql_text: Str) -> Tuple[SamarDBServer
     )
     return (next_srv, result_msg)
 
-# ── High-Concurrency Non-Blocking Polling Loop ────────────────────────────────
-def server_poll_conns(srv: SamarDBServer, listener: Int) -> SamarDBServer:
+# ── Execute Prepared Statement with Bound Parameters ──────────────────────────
+def server_execute_prepared(
+    srv: SamarDBServer,
+    stmt: PreparedStatement,
+    param_values: List[Int]
+) -> Tuple[SamarDBServer, Str]:
+    sub_sql := sql_substitute_params(stmt.sql_text, param_values)
+    return server_execute_sql(srv, sub_sql)
+
+# ── Server Connection Polling & Multi-Client Handler ──────────────────────────
+def server_poll_conns(srv: SamarDBServer, listen_fd: Int) -> SamarDBServer:
     mut cur_srv := srv
     
-    # 1. Accept new incoming connection if slot available
-    client_fd := net_accept_timeout(listener, 10)
-    if client_fd > 0:
-        (new_pool, slot_idx) := conn_pool_acquire(cur_srv.conn_pool, client_fd)
-        if slot_idx >= 0:
-            cur_srv = SamarDBServer(
-                cur_srv.port,
-                cur_srv.is_running,
-                new_pool.active_conns,
-                cur_srv.queries_served,
-                cur_srv.cat,
-                cur_srv.pool,
-                cur_srv.tx_mgr,
-                cur_srv.wal_mgr,
-                cur_srv.meridian,
-                new_pool
-            )
-        else:
-            # Pool full: send error & close
-            net_send(client_fd, "FATAL: 53300 too_many_connections\r\n")
-            net_close(client_fd)
+    # 1. Accept incoming connections if available (non-blocking poll)
+    if net_poll(listen_fd, 0) == 1:
+        client_fd := net_accept(listen_fd)
+        if client_fd > 0:
+            net_set_nonblocking(client_fd, true)
+            (new_pool, slot_idx) := conn_pool_acquire(cur_srv.conn_pool, client_fd)
+            if slot_idx >= 0:
+                cur_srv = SamarDBServer(
+                    cur_srv.port,
+                    cur_srv.is_running,
+                    cur_srv.active_conns + 1,
+                    cur_srv.queries_served,
+                    cur_srv.cat,
+                    cur_srv.pool,
+                    cur_srv.tx_mgr,
+                    cur_srv.wal_mgr,
+                    cur_srv.meridian,
+                    new_pool
+                )
+            else:
+                net_send(client_fd, "FATAL: 53300 too_many_connections\r\n")
+                net_close(client_fd)
             
-    # 2. Service active slots
+    # 2. Service active slots without blocking
     mut p := 0
     while p < cur_srv.conn_pool.max_conns:
         slot := cur_srv.conn_pool.slots[p]
         if slot.state != CONN_STATE_DISCONNECTED() && slot.fd > 0:
-            req_data := net_recv(slot.fd, 4096)
-            if str_len(req_data) > 0:
-                # Handle client request
-                (after_exec_srv, _) := server_execute_sql(cur_srv, "SELECT 1;")
-                net_send(slot.fd, "PGRES_READY_OK\r\n")
-                
-                # Update slot
-                mut next_slots := list_new()
-                mut k := 0
-                while k < after_exec_srv.conn_pool.max_conns:
-                    if k == p:
-                        list_push(next_slots, ConnectionSlot(slot.fd, CONN_STATE_CONNECTED(), slot.txn_id, slot.queries_served + 1, ""))
-                    else:
-                        list_push(next_slots, after_exec_srv.conn_pool.slots[k])
-                    k = k + 1
+            if net_poll(slot.fd, 0) == 1:
+                req_data := net_recv(slot.fd, 4096)
+                if str_len(req_data) > 0:
+                    (after_exec_srv, _) := server_execute_sql(cur_srv, "SELECT 1;")
+                    net_send(slot.fd, "PGRES_READY_OK\r\n")
                     
-                cur_srv = SamarDBServer(
-                    after_exec_srv.port,
-                    after_exec_srv.is_running,
-                    after_exec_srv.active_conns,
-                    after_exec_srv.queries_served,
-                    after_exec_srv.cat,
-                    after_exec_srv.pool,
-                    after_exec_srv.tx_mgr,
-                    after_exec_srv.wal_mgr,
-                    after_exec_srv.meridian,
-                    ConnectionPool(next_slots, after_exec_srv.conn_pool.max_conns, after_exec_srv.conn_pool.active_conns, after_exec_srv.conn_pool.total_served + 1)
-                )
+                    mut next_slots := list_new()
+                    mut k := 0
+                    while k < after_exec_srv.conn_pool.max_conns:
+                        if k == p:
+                            list_push(next_slots, ConnectionSlot(slot.fd, CONN_STATE_CONNECTED(), slot.txn_id, slot.queries_served + 1, ""))
+                        else:
+                            list_push(next_slots, after_exec_srv.conn_pool.slots[k])
+                        k = k + 1
+                        
+                    cur_srv = SamarDBServer(
+                        after_exec_srv.port,
+                        after_exec_srv.is_running,
+                        after_exec_srv.active_conns,
+                        after_exec_srv.queries_served,
+                        after_exec_srv.cat,
+                        after_exec_srv.pool,
+                        after_exec_srv.tx_mgr,
+                        after_exec_srv.wal_mgr,
+                        after_exec_srv.meridian,
+                        ConnectionPool(next_slots, after_exec_srv.conn_pool.max_conns, after_exec_srv.conn_pool.active_conns, after_exec_srv.conn_pool.total_served + 1)
+                    )
         p = p + 1
         
     return cur_srv

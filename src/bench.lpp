@@ -240,7 +240,8 @@ def run_bench_optimizer(n_queries: Int) -> BenchResult:
     pq := ParsedQuery(
         QUERY_SELECT(), "orders", list_new(), list_new(),
         "id", OP_EQ(), 42,
-        "", "", ""
+        "", "", "",
+        "", false, "", 0
     )
 
     mut stats := bench_stats_new()

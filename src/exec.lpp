@@ -348,7 +348,6 @@ def execute_update(
             if mvcc_is_tuple_visible(thdr, snap, txn_id, tx_mgr):
                 payload := heap_mvcc_get(heap_buf, s)
                 if record_get_int(payload, where_col_idx) == where_val:
-                    # Update column in record
                     record_set_int(payload, set_col_idx, new_val)
                     (p_after_up, new_slot, up_ok) := heap_mvcc_update(heap_buf, s, payload, txn_id, 0)
                     if up_ok:
@@ -396,3 +395,50 @@ def execute_delete(
         
     p2 := buffer_pool_unpin_page(p1, ts.heap_page_id, deleted_count > 0)
     return (p2, tx_mgr, wal_mgr, deleted_count)
+
+# ── DML Operator: UPSERT (INSERT ... ON CONFLICT DO UPDATE) ───────────────────
+def execute_upsert(
+    cat: Catalog,
+    pool: BufferPool,
+    tx_mgr: TxManager,
+    wal_mgr: WalManager,
+    table_name: Str,
+    values: List[Int],
+    conflict_col_name: Str,
+    do_update: Bool,
+    set_col_name: Str,
+    set_val: Int,
+    txn_id: Int
+) -> Tuple[BufferPool, TxManager, WalManager, Bool]:
+    (ts, found) := catalog_get_table(cat, table_name)
+    if !found:
+        return (pool, tx_mgr, wal_mgr, false)
+        
+    pk_val := values[ts.pk_col_idx]
+    mut cur_pool := pool
+    
+    # 1. Check if record exists via B+Tree index lookup
+    mut exists := false
+    if ts.index_page_id != 0:
+        (p_idx, idx_buf, ifetch_ok) := buffer_pool_fetch_page(cur_pool, ts.index_page_id)
+        if ifetch_ok:
+            (slot, b_found) := btree_leaf_find_cell(idx_buf, pk_val)
+            if b_found:
+                exists = true
+            cur_pool = buffer_pool_unpin_page(p_idx, ts.index_page_id, false)
+            
+    if exists:
+        if do_update:
+            set_col_idx := catalog_find_col_idx(ts, set_col_name)
+            where_col_idx := catalog_find_col_idx(ts, conflict_col_name)
+            if set_col_idx < 0 || where_col_idx < 0:
+                return (cur_pool, tx_mgr, wal_mgr, false)
+            (p_upd, tx_upd, wal_upd, count) := execute_update(cat, cur_pool, tx_mgr, wal_mgr, table_name, set_col_idx, set_val, where_col_idx, pk_val, txn_id)
+            mut updated_ok := false
+            if count > 0:
+                updated_ok = true
+            return (p_upd, tx_upd, wal_upd, updated_ok)
+        else:
+            return (cur_pool, tx_mgr, wal_mgr, true)
+    else:
+        return execute_insert(cat, cur_pool, tx_mgr, wal_mgr, table_name, values, txn_id)

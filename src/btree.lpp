@@ -91,7 +91,8 @@ def btree_set_cell_offset(page: Bytes, index: Int, cell_offset: Int):
 # ── Fast Binary Search within Node (Zero-Allocation Fast-Path) ───────────────
 # Returns (index, exact_match)
 def btree_leaf_find_cell(page: Bytes, key: Int) -> Tuple[Int, Bool]:
-    slot_count := bytes_get16le(page, 20) # byte 20 = slot_count
+    hdr := page_header_decode(page)
+    slot_count := hdr.slot_count
     mut low := 0
     mut high := slot_count - 1
     
