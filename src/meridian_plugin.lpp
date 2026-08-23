@@ -1358,6 +1358,151 @@ def meridian_hnsw_search_top1(h: MeridianHNSW, query_dims: List[Int]) -> Int:
 def meridian_hnsw_count(h: MeridianHNSW) -> Int:
     return list_len(h.node_ids)
 
+# ── Dynamic Slot Resharding & Multi-Region WAN Mesh (Phase 25) ───────────────
+
+# 1. Cluster Hash Slot Router
+struct MeridianClusterTable:
+    slots:           List[Int] # 0..16383 owner node IDs
+    migrating_slots: List[Int] # slot numbers currently migrating
+    target_nodes:    List[Int] # target node IDs for migrating slots
+
+def meridian_cluster_new(default_node: Int) -> MeridianClusterTable:
+    mut s := list_new()
+    mut i := 0
+    while i < 16384:
+        list_push(s, default_node)
+        i = i + 1
+    return MeridianClusterTable(s, list_new(), list_new())
+
+def meridian_cluster_assign_range(
+    c: MeridianClusterTable,
+    start_slot: Int,
+    end_slot: Int,
+    owner_node: Int
+) -> MeridianClusterTable:
+    mut next_s := list_new()
+    mut i := 0
+    while i < list_len(c.slots):
+        if i >= start_slot && i <= end_slot:
+            list_push(next_s, owner_node)
+        else:
+            list_push(next_s, c.slots[i])
+        i = i + 1
+    return MeridianClusterTable(next_s, c.migrating_slots, c.target_nodes)
+
+def meridian_cluster_start_migration(
+    c: MeridianClusterTable,
+    slot: Int,
+    target_node: Int
+) -> MeridianClusterTable:
+    mut next_mig := list_new()
+    mut next_targets := list_new()
+    
+    mut i := 0
+    while i < list_len(c.migrating_slots):
+        list_push(next_mig, c.migrating_slots[i])
+        list_push(next_targets, c.target_nodes[i])
+        i = i + 1
+        
+    list_push(next_mig, slot)
+    list_push(next_targets, target_node)
+    
+    return MeridianClusterTable(c.slots, next_mig, next_targets)
+
+def meridian_cluster_commit_cutover(
+    c: MeridianClusterTable,
+    slot: Int
+) -> MeridianClusterTable:
+    mut target_owner := c.slots[slot]
+    mut next_mig := list_new()
+    mut next_targets := list_new()
+    
+    mut i := 0
+    while i < list_len(c.migrating_slots):
+        if c.migrating_slots[i] == slot:
+            target_owner = c.target_nodes[i]
+        else:
+            list_push(next_mig, c.migrating_slots[i])
+            list_push(next_targets, c.target_nodes[i])
+        i = i + 1
+        
+    mut next_s := list_new()
+    mut j := 0
+    while j < list_len(c.slots):
+        if j == slot:
+            list_push(next_s, target_owner)
+        else:
+            list_push(next_s, c.slots[j])
+        j = j + 1
+        
+    return MeridianClusterTable(next_s, next_mig, next_targets)
+
+def meridian_cluster_route_slot(c: MeridianClusterTable, slot: Int) -> Int:
+    # Check if in migration
+    mut i := 0
+    while i < list_len(c.migrating_slots):
+        if c.migrating_slots[i] == slot:
+            return c.target_nodes[i] # Redirected to target node (ASK)
+        i = i + 1
+    return c.slots[slot]
+
+# 2. Multi-Region Active-Active WAN Mesh
+struct MeridianWanEngine:
+    keys:        List[Str]
+    vals:        List[Str]
+    timestamps:  List[Int] # Epoch nanoseconds for LWW
+    region_id:   Int
+
+def meridian_wan_new(region: Int) -> MeridianWanEngine:
+    return MeridianWanEngine(list_new(), list_new(), list_new(), region)
+
+def meridian_wan_put(
+    w: MeridianWanEngine,
+    key: Str,
+    val: Str,
+    ts: Int
+) -> MeridianWanEngine:
+    mut next_k := list_new()
+    mut next_v := list_new()
+    mut next_ts := list_new()
+    
+    mut found := false
+    mut i := 0
+    while i < list_len(w.keys):
+        if w.keys[i] == key:
+            if ts >= w.timestamps[i]:
+                # LWW Overwrite with newer timestamp
+                list_push(next_k, key)
+                list_push(next_v, val)
+                list_push(next_ts, ts)
+            else:
+                # Stale write dropped
+                list_push(next_k, w.keys[i])
+                list_push(next_v, w.vals[i])
+                list_push(next_ts, w.timestamps[i])
+            found = true
+        else:
+            list_push(next_k, w.keys[i])
+            list_push(next_v, w.vals[i])
+            list_push(next_ts, w.timestamps[i])
+        i = i + 1
+        
+    if !found:
+        list_push(next_k, key)
+        list_push(next_v, val)
+        list_push(next_ts, ts)
+        
+    return MeridianWanEngine(next_k, next_v, next_ts, w.region_id)
+
+def meridian_wan_get(w: MeridianWanEngine, key: Str) -> Str:
+    mut i := 0
+    while i < list_len(w.keys):
+        if w.keys[i] == key:
+            return w.vals[i]
+        i = i + 1
+    return ""
+
+
 
 
 
