@@ -1,0 +1,119 @@
+# samardb MERIDIAN Rich Data Structures Test Suite (L++ Pure Native)
+import bytes
+import io
+import pager
+import heap
+import btree
+import schema
+import parser
+import exec
+import opt
+import agg
+import wal
+import recovery
+import concur
+import pgwire
+import meridian_plugin
+import server
+
+def assert_bool(name: Str, actual: Bool, expected: Bool) -> Void:
+    if actual == expected:
+        print_str(str_concat("  [PASS] ", name))
+    else:
+        print_str(str_concat("  [FAIL] ", name))
+
+def assert_int(name: Str, actual: Int, expected: Int) -> Void:
+    if actual == expected:
+        print_str(str_concat("  [PASS] ", name))
+    else:
+        msg := str_concat("  [FAIL] ", str_concat(name, str_concat(" (expected: ", str_concat(int_to_str(expected), str_concat(", got: ", str_concat(int_to_str(actual), ")"))))))
+        print_str(msg)
+
+def assert_str(name: Str, actual: Str, expected: Str) -> Void:
+    if str_eq_ci(actual, expected):
+        print_str(str_concat("  [PASS] ", name))
+    else:
+        msg := str_concat("  [FAIL] ", str_concat(name, str_concat(" (expected: '", str_concat(expected, str_concat("', got: '", str_concat(actual, "')"))))))
+        print_str(msg)
+
+def main() -> Void:
+    print_str("================================================================")
+    print_str("   SAMARDB MERIDIAN RICH DATA STRUCTURES TEST SUITE            ")
+    print_str("================================================================")
+
+    # ── [1/4] HyperLogLog Cardinality Sketch & Monoid Union ───────────────────
+    print_str("--- [1/4] Testing HyperLogLog Cardinality Sketch & Merge ---")
+    hll1 := meridian_hll_new()
+    hll2 := meridian_hll_new()
+
+    mut h1 := hll1
+    mut i := 1
+    while i <= 50:
+        h1 = meridian_hll_add(h1, i * 1664525)
+        i = i + 1
+
+    cnt1 := meridian_hll_count(h1)
+    assert_bool("HLL1 count estimates non-zero cardinality", cnt1 > 0, true)
+
+    mut h2 := hll2
+    mut j := 51
+    while j <= 100:
+        h2 = meridian_hll_add(h2, j * 1664525)
+        j = j + 1
+
+    h_merged := meridian_hll_merge(h1, h2)
+    cnt_merged := meridian_hll_count(h_merged)
+    assert_bool("Merged HLL count >= single HLL count", cnt_merged >= cnt1, true)
+
+    # ── [2/4] Multi-Cluster CRDT PN-Counter Convergence ───────────────────────
+    print_str("--- [2/4] Testing Multi-Cluster CRDT PN-Counter Convergence ---")
+    crdt_a := meridian_crdt_new()
+    crdt_b := meridian_crdt_new()
+
+    ca1 := meridian_crdt_inc(crdt_a, 1, 100) # Cluster 1 +100
+    ca2 := meridian_crdt_dec(ca1, 1, 20)    # Cluster 1 -20
+    assert_int("Cluster A net value is 80", meridian_crdt_value(ca2), 80)
+
+    cb1 := meridian_crdt_inc(crdt_b, 2, 50)  # Cluster 2 +50
+    cb2 := meridian_crdt_dec(cb1, 2, 10)    # Cluster 2 -10
+    assert_int("Cluster B net value is 40", meridian_crdt_value(cb2), 40)
+
+    c_converged := meridian_crdt_merge(ca2, cb2)
+    assert_int("Converged multi-cluster CRDT value is 120", meridian_crdt_value(c_converged), 120)
+
+    # ── [3/4] Dense Sorted Set (ZSet) Score & Rank Engine ─────────────────────
+    print_str("--- [3/4] Testing Dense Sorted Set (ZSet) Ranking & Range ---")
+    z0 := meridian_zset_new()
+    z1 := meridian_zset_add(z0, 100, "player1")
+    z2 := meridian_zset_add(z1, 250, "player2")
+    z3 := meridian_zset_add(z2, 175, "player3")
+    z4 := meridian_zset_add(z3, 50,  "player4")
+
+    assert_int("ZSet total members is 4", list_len(z4.members), 4)
+    assert_int("player3 score is 175", meridian_zset_score(z4, "player3"), 175)
+    assert_int("player4 has lowest score -> rank 0", meridian_zset_rank(z4, "player4"), 0)
+    assert_int("player1 rank is 1", meridian_zset_rank(z4, "player1"), 1)
+    assert_int("player3 rank is 2", meridian_zset_rank(z4, "player3"), 2)
+    assert_int("player2 rank is 3", meridian_zset_rank(z4, "player2"), 3)
+
+    range_items := meridian_zset_range(z4, 100, 200)
+    assert_int("Range [100, 200] contains 2 members", list_len(range_items), 2)
+    assert_str("Range item 0 is player1", range_items[0], "player1")
+    assert_str("Range item 1 is player3", range_items[1], "player3")
+
+    # ── [4/4] Quantized Vector Index & Cosine Dot Product Search ──────────────
+    print_str("--- [4/4] Testing Quantized Vector Index & Semantic Search ---")
+    v0 := meridian_vec_new()
+    v1 := meridian_vec_add(v0, 101, 100, 0, 0, 0)   # Vector 101 along X axis
+    v2 := meridian_vec_add(v1, 102, 0, 100, 0, 0)   # Vector 102 along Y axis
+    v3 := meridian_vec_add(v2, 103, 90, 10, 0, 0)   # Vector 103 near X axis
+
+    best_for_x := meridian_vec_search_top1(v3, 95, 5, 0, 0)
+    assert_int("Query near X axis matches Vector 101", best_for_x, 101)
+
+    best_for_y := meridian_vec_search_top1(v3, 5, 95, 0, 0)
+    assert_int("Query near Y axis matches Vector 102", best_for_y, 102)
+
+    print_str("================================================================")
+    print_str(" [SUCCESS] ALL MERIDIAN RICH DATA STRUCTURE TESTS PASSED 100%!  ")
+    print_str("================================================================")

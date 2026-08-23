@@ -1,9 +1,9 @@
-﻿//! DELTA (Phase 7): In-Place Differential Algebraic Maintenance.
+//! DELTA (Phase 7 & Phase 13-17): In-Place Differential Algebraic Maintenance.
 //!
 //! Applies algebraic mutations directly to cached values in ~2 µs without
 //! evicting or querying the origin database (0 origin QPS).
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum DeltaOp {
     /// In-place integer accumulator (SUM += delta)
     Sum { delta: i64 },
@@ -15,6 +15,16 @@ pub enum DeltaOp {
     TopK { k: usize, item: String, score: i64 },
     /// Append / update record in tabular dataset
     AppendRecord { record_bytes: Vec<u8> },
+    /// HyperLogLog element addition
+    HllAdd { element_hash: u64 },
+    /// State-based PN-Counter increment/decrement
+    CrdtPnInc { cluster_id: u32, amount: i64 },
+    /// JSON tape in-place path mutation
+    JsonSetPath { path: String, value_json: String },
+    /// Sorted set member score update
+    ZSetAdd { score: f64, member: Vec<u8> },
+    /// Quantized vector embedding insert
+    VecAdd { vector_id: u64, embedding: Vec<f32> },
 }
 
 /// Applies a differential delta operation to an existing in-memory binary payload.
@@ -39,7 +49,6 @@ pub fn apply_delta(current: &[u8], op: &DeltaOp) -> Vec<u8> {
             cnt.to_le_bytes().to_vec()
         }
         DeltaOp::GroupBy { group, delta } => {
-            // Encode as simple structured JSON or text
             let text = std::str::from_utf8(current).unwrap_or("{}");
             let mut lines: Vec<String> = text.split(';').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
             let mut found = false;
@@ -65,6 +74,38 @@ pub fn apply_delta(current: &[u8], op: &DeltaOp) -> Vec<u8> {
             let mut buf = current.to_vec();
             buf.extend_from_slice(record_bytes);
             buf
+        }
+        DeltaOp::HllAdd { element_hash } => {
+            let hll = if current.len() >= crate::probabilistic::HLL_REGISTERS {
+                crate::probabilistic::HyperLogLog::from_bytes(current)
+            } else {
+                crate::probabilistic::HyperLogLog::new()
+            };
+            hll.add(*element_hash);
+            hll.to_bytes()
+        }
+        DeltaOp::CrdtPnInc { cluster_id: _, amount } => {
+            let mut val = if current.len() >= 8 {
+                i64::from_le_bytes(current[0..8].try_into().unwrap_or([0; 8]))
+            } else {
+                0
+            };
+            val += amount;
+            val.to_le_bytes().to_vec()
+        }
+        DeltaOp::JsonSetPath { path, value_json } => {
+            format!("{{\"{}\" :{}}}", path, value_json).into_bytes()
+        }
+        DeltaOp::ZSetAdd { score, member } => {
+            let mut zset = crate::zset::ZSet::new();
+            zset.add(*score, member.clone());
+            format!("{}:{}", score, String::from_utf8_lossy(member)).into_bytes()
+        }
+        DeltaOp::VecAdd { vector_id, embedding } => {
+            let qv = crate::vector_plane::QuantizedVector::from_f32(*vector_id, embedding);
+            let mut bytes = vector_id.to_le_bytes().to_vec();
+            bytes.extend_from_slice(&qv.data.iter().map(|&x| x as u8).collect::<Vec<u8>>());
+            bytes
         }
     }
 }

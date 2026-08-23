@@ -272,3 +272,270 @@ def meridian_mesh_record_hit(mesh: MeridianMeshCluster) -> MeridianMeshCluster:
         mesh.total_mesh_deltas,
         mesh.total_gossip_msgs
     )
+
+# ── Native L++ Rich Data Structure Engines (Phases 13-17) ─────────────────────
+
+# 1. HyperLogLog Cardinality Sketch
+struct MeridianHLL:
+    registers: List[Int]
+    size:      Int
+
+def meridian_hll_new() -> MeridianHLL:
+    mut regs := list_new()
+    mut i := 0
+    while i < 128:
+        list_push(regs, 0)
+        i = i + 1
+    return MeridianHLL(regs, 128)
+
+def meridian_hll_add(hll: MeridianHLL, element_hash: Int) -> MeridianHLL:
+    mut k := element_hash
+    if k < 0:
+        k = -k
+    idx := k % hll.size
+    mut w := (k / hll.size) + 1
+    mut lz := 1
+    while w > 1 && lz < 64:
+        if w % 2 == 1:
+            break
+        lz = lz + 1
+        w = w / 2
+        
+    mut next_regs := list_new()
+    mut j := 0
+    while j < hll.size:
+        if j == idx:
+            cur := hll.registers[j]
+            if lz > cur:
+                list_push(next_regs, lz)
+            else:
+                list_push(next_regs, cur)
+        else:
+            list_push(next_regs, hll.registers[j])
+        j = j + 1
+        
+    return MeridianHLL(next_regs, hll.size)
+
+def meridian_hll_count(hll: MeridianHLL) -> Int:
+    mut zeros := 0
+    mut i := 0
+    while i < hll.size:
+        if hll.registers[i] == 0:
+            zeros = zeros + 1
+        i = i + 1
+        
+    if zeros > 0:
+        # Linear counting approximation for integer arithmetic
+        return (hll.size * (hll.size - zeros)) / hll.size
+    return hll.size * 3 / 2
+
+def meridian_hll_merge(h1: MeridianHLL, h2: MeridianHLL) -> MeridianHLL:
+    mut merged := list_new()
+    mut i := 0
+    while i < h1.size:
+        v1 := h1.registers[i]
+        v2 := h2.registers[i]
+        if v1 > v2:
+            list_push(merged, v1)
+        else:
+            list_push(merged, v2)
+        i = i + 1
+    return MeridianHLL(merged, h1.size)
+
+# 2. Conflict-Free Replicated Data Type (PN-Counter)
+struct MeridianCRDT:
+    p_clusters: List[Int]
+    p_values:   List[Int]
+    n_clusters: List[Int]
+    n_values:   List[Int]
+
+def meridian_crdt_new() -> MeridianCRDT:
+    return MeridianCRDT(list_new(), list_new(), list_new(), list_new())
+
+def meridian_crdt_inc(c: MeridianCRDT, cluster_id: Int, amount: Int) -> MeridianCRDT:
+    mut next_clusters := list_new()
+    mut next_values := list_new()
+    mut found := false
+    
+    mut i := 0
+    while i < list_len(c.p_clusters):
+        cid := c.p_clusters[i]
+        val := c.p_values[i]
+        if cid == cluster_id:
+            list_push(next_clusters, cid)
+            list_push(next_values, val + amount)
+            found = true
+        else:
+            list_push(next_clusters, cid)
+            list_push(next_values, val)
+        i = i + 1
+        
+    if !found:
+        list_push(next_clusters, cluster_id)
+        list_push(next_values, amount)
+        
+    return MeridianCRDT(next_clusters, next_values, c.n_clusters, c.n_values)
+
+def meridian_crdt_dec(c: MeridianCRDT, cluster_id: Int, amount: Int) -> MeridianCRDT:
+    mut next_clusters := list_new()
+    mut next_values := list_new()
+    mut found := false
+    
+    mut i := 0
+    while i < list_len(c.n_clusters):
+        cid := c.n_clusters[i]
+        val := c.n_values[i]
+        if cid == cluster_id:
+            list_push(next_clusters, cid)
+            list_push(next_values, val + amount)
+            found = true
+        else:
+            list_push(next_clusters, cid)
+            list_push(next_values, val)
+        i = i + 1
+        
+    if !found:
+        list_push(next_clusters, cluster_id)
+        list_push(next_values, amount)
+        
+    return MeridianCRDT(c.p_clusters, c.p_values, next_clusters, next_values)
+
+def meridian_crdt_value(c: MeridianCRDT) -> Int:
+    mut p_sum := 0
+    mut i := 0
+    while i < list_len(c.p_values):
+        p_sum = p_sum + c.p_values[i]
+        i = i + 1
+        
+    mut n_sum := 0
+    mut j := 0
+    while j < list_len(c.n_values):
+        n_sum = n_sum + c.n_values[j]
+        j = j + 1
+        
+    return p_sum - n_sum
+
+def meridian_crdt_merge(c1: MeridianCRDT, c2: MeridianCRDT) -> MeridianCRDT:
+    mut res := c1
+    mut i := 0
+    while i < list_len(c2.p_clusters):
+        cid := c2.p_clusters[i]
+        val := c2.p_values[i]
+        res = meridian_crdt_inc(res, cid, val)
+        i = i + 1
+    mut j := 0
+    while j < list_len(c2.n_clusters):
+        cid := c2.n_clusters[j]
+        val := c2.n_values[j]
+        res = meridian_crdt_dec(res, cid, val)
+        j = j + 1
+    return res
+
+# 3. Dense Sorted Set (ZSet)
+struct MeridianZSet:
+    scores:  List[Int]
+    members: List[Str]
+
+def meridian_zset_new() -> MeridianZSet:
+    return MeridianZSet(list_new(), list_new())
+
+def meridian_zset_add(zset: MeridianZSet, score: Int, member: Str) -> MeridianZSet:
+    mut next_scores := list_new()
+    mut next_members := list_new()
+    mut inserted := false
+    
+    mut i := 0
+    while i < list_len(zset.members):
+        s := zset.scores[i]
+        m := zset.members[i]
+        if m != member:
+            if !inserted && score < s:
+                list_push(next_scores, score)
+                list_push(next_members, member)
+                inserted = true
+            list_push(next_scores, s)
+            list_push(next_members, m)
+        i = i + 1
+        
+    if !inserted:
+        list_push(next_scores, score)
+        list_push(next_members, member)
+        
+    return MeridianZSet(next_scores, next_members)
+
+def meridian_zset_rank(zset: MeridianZSet, member: Str) -> Int:
+    mut i := 0
+    while i < list_len(zset.members):
+        if zset.members[i] == member:
+            return i
+        i = i + 1
+    return -1
+
+def meridian_zset_score(zset: MeridianZSet, member: Str) -> Int:
+    mut i := 0
+    while i < list_len(zset.members):
+        if zset.members[i] == member:
+            return zset.scores[i]
+        i = i + 1
+    return -1
+
+def meridian_zset_range(zset: MeridianZSet, min_score: Int, max_score: Int) -> List[Str]:
+    mut res := list_new()
+    mut i := 0
+    while i < list_len(zset.members):
+        s := zset.scores[i]
+        if s >= min_score && s <= max_score:
+            list_push(res, zset.members[i])
+        i = i + 1
+    return res
+
+# 4. Quantized Embedding Vector Index
+struct MeridianVectorIndex:
+    ids: List[Int]
+    v0:  List[Int]
+    v1:  List[Int]
+    v2:  List[Int]
+    v3:  List[Int]
+
+def meridian_vec_new() -> MeridianVectorIndex:
+    return MeridianVectorIndex(list_new(), list_new(), list_new(), list_new(), list_new())
+
+def meridian_vec_add(idx: MeridianVectorIndex, id: Int, x: Int, y: Int, z: Int, w: Int) -> MeridianVectorIndex:
+    mut next_ids := list_new()
+    mut next_v0 := list_new()
+    mut next_v1 := list_new()
+    mut next_v2 := list_new()
+    mut next_v3 := list_new()
+    
+    mut i := 0
+    while i < list_len(idx.ids):
+        if idx.ids[i] != id:
+            list_push(next_ids, idx.ids[i])
+            list_push(next_v0, idx.v0[i])
+            list_push(next_v1, idx.v1[i])
+            list_push(next_v2, idx.v2[i])
+            list_push(next_v3, idx.v3[i])
+        i = i + 1
+        
+    list_push(next_ids, id)
+    list_push(next_v0, x)
+    list_push(next_v1, y)
+    list_push(next_v2, z)
+    list_push(next_v3, w)
+    
+    return MeridianVectorIndex(next_ids, next_v0, next_v1, next_v2, next_v3)
+
+def meridian_vec_search_top1(idx: MeridianVectorIndex, qx: Int, qy: Int, qz: Int, qw: Int) -> Int:
+    mut best_id := -1
+    mut max_dot := -999999999
+    
+    mut i := 0
+    while i < list_len(idx.ids):
+        dot := idx.v0[i] * qx + idx.v1[i] * qy + idx.v2[i] * qz + idx.v3[i] * qw
+        if dot > max_dot:
+            max_dot = dot
+            best_id = idx.ids[i]
+        i = i + 1
+        
+    return best_id
+
