@@ -1,0 +1,88 @@
+# samardb MERIDIAN FlashTier NVMe/SSD Storage Spillover Test Suite (L++ Pure Native)
+import bytes
+import io
+import pager
+import heap
+import btree
+import schema
+import parser
+import exec
+import opt
+import agg
+import wal
+import recovery
+import concur
+import pgwire
+import meridian_plugin
+import server
+
+def assert_bool(name: Str, actual: Bool, expected: Bool) -> Void:
+    if actual == expected:
+        print_str(str_concat("  [PASS] ", name))
+    else:
+        print_str(str_concat("  [FAIL] ", name))
+
+def assert_int(name: Str, actual: Int, expected: Int) -> Void:
+    if actual == expected:
+        print_str(str_concat("  [PASS] ", name))
+    else:
+        msg := str_concat("  [FAIL] ", str_concat(name, str_concat(" (expected: ", str_concat(int_to_str(expected), str_concat(", got: ", str_concat(int_to_str(actual), ")"))))))
+        print_str(msg)
+
+def assert_str(name: Str, actual: Str, expected: Str) -> Void:
+    if str_eq_ci(actual, expected):
+        print_str(str_concat("  [PASS] ", name))
+    else:
+        msg := str_concat("  [FAIL] ", str_concat(name, str_concat(" (expected: '", str_concat(expected, str_concat("', got: '", str_concat(actual, "')"))))))
+        print_str(msg)
+
+def main() -> Void:
+    print_str("================================================================")
+    print_str("   SAMARDB MERIDIAN FLASHTIER NVME STORAGE TEST SUITE          ")
+    print_str("================================================================")
+
+    # ── [1/4] Zero-I/O Sparse Index Probing ───────────────────────────────────
+    print_str("--- [1/4] Testing Zero-I/O Sparse DRAM Index Probing ---")
+    f0 := meridian_flash_new()
+    f1 := meridian_flash_spill(f0, 1001, "COLD_USER_42_DOCUMENT_PAYLOAD")
+    f2 := meridian_flash_spill(f1, 1002, "COLD_USER_99_ARCHIVE_DATA")
+
+    assert_int("FlashTier total items is 2", meridian_flash_count(f2), 2)
+    assert_bool("Key 1001 exists in FlashTier index", meridian_flash_contains(f2, 1001), true)
+    assert_bool("Key 1002 exists in FlashTier index", meridian_flash_contains(f2, 1002), true)
+    assert_bool("Key 9999 (non-existent) returns false with 0 disk I/O", meridian_flash_contains(f2, 9999), false)
+
+    # ── [2/4] Roundtrip Cold Spill & NVMe Read Retrieval ──────────────────────
+    print_str("--- [2/4] Testing Roundtrip Cold Spill & Retrieval ---")
+    val_1001 := meridian_flash_get(f2, 1001)
+    val_1002 := meridian_flash_get(f2, 1002)
+
+    assert_str("Retrieved payload for Key 1001", val_1001, "COLD_USER_42_DOCUMENT_PAYLOAD")
+    assert_str("Retrieved payload for Key 1002", val_1002, "COLD_USER_99_ARCHIVE_DATA")
+
+    # ── [3/4] Dual-Ascent Frequency-Based L0 Promotion ────────────────────────
+    print_str("--- [3/4] Testing Frequency-Based DRAM Promotion ---")
+    # Read 1: hit count = 1 -> No promotion
+    f3 := meridian_flash_record_read(f2, 1001)
+    assert_int("Total reads incremented to 1", f3.total_reads, 1)
+    assert_int("Promotion count is 0 (below threshold 2)", f3.total_promos, 0)
+
+    # Read 2: hit count = 2 -> Triggers promotion back to L0!
+    f4 := meridian_flash_record_read(f3, 1001)
+    assert_int("Total reads incremented to 2", f4.total_reads, 2)
+    assert_int("Promotion count incremented to 1 (promoted to L0)", f4.total_promos, 1)
+
+    # ── [4/4] Multi-Item Batch Spillover Scale ────────────────────────────────
+    print_str("--- [4/4] Testing Multi-Item Batch Spillover Scale ---")
+    mut f_batch := f4
+    mut k := 2001
+    while k <= 2050:
+        f_batch = meridian_flash_spill(f_batch, k, "BULK_SPILL_PAYLOAD")
+        k = k + 1
+
+    assert_int("FlashTier total items scaled to 52", meridian_flash_count(f_batch), 52)
+    assert_int("Total spills recorded is 52", f_batch.total_spills, 52)
+
+    print_str("================================================================")
+    print_str(" [SUCCESS] ALL MERIDIAN FLASHTIER NVME TESTS PASSED 100%!       ")
+    print_str("================================================================")

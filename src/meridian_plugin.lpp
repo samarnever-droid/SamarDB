@@ -788,6 +788,120 @@ def meridian_pubsub_publish(ps: MeridianPubSub, target_topic: Str) -> List[Int]:
         i = i + 1
     return matched
 
+# ── Tiered NVMe / SSD Storage Spillover Engine (Phase 20) ────────────────────
+
+struct MeridianFlashTier:
+    key_hashes:   List[Int]
+    disk_offsets: List[Int]
+    payload_lens: List[Int]
+    hit_counts:   List[Int]
+    disk_data:    List[Str]
+    total_spills: Int
+    total_reads:  Int
+    total_promos: Int
+
+def meridian_flash_new() -> MeridianFlashTier:
+    return MeridianFlashTier(
+        list_new(),
+        list_new(),
+        list_new(),
+        list_new(),
+        list_new(),
+        0,
+        0,
+        0
+    )
+
+def meridian_flash_spill(
+    f: MeridianFlashTier,
+    key_hash: Int,
+    payload: Str
+) -> MeridianFlashTier:
+    mut next_hashes := list_new()
+    mut next_offsets := list_new()
+    mut next_lens := list_new()
+    mut next_hits := list_new()
+    mut next_disk := list_new()
+    
+    mut i := 0
+    while i < list_len(f.key_hashes):
+        if f.key_hashes[i] != key_hash:
+            list_push(next_hashes, f.key_hashes[i])
+            list_push(next_offsets, f.disk_offsets[i])
+            list_push(next_lens, f.payload_lens[i])
+            list_push(next_hits, f.hit_counts[i])
+            list_push(next_disk, f.disk_data[i])
+        i = i + 1
+        
+    offset := list_len(next_disk)
+    len_p := str_len(payload)
+    
+    list_push(next_hashes, key_hash)
+    list_push(next_offsets, offset)
+    list_push(next_lens, len_p)
+    list_push(next_hits, 0)
+    list_push(next_disk, payload)
+    
+    return MeridianFlashTier(
+        next_hashes,
+        next_offsets,
+        next_lens,
+        next_hits,
+        next_disk,
+        f.total_spills + 1,
+        f.total_reads,
+        f.total_promos
+    )
+
+def meridian_flash_contains(f: MeridianFlashTier, key_hash: Int) -> Bool:
+    mut i := 0
+    while i < list_len(f.key_hashes):
+        if f.key_hashes[i] == key_hash:
+            return true
+        i = i + 1
+    return false
+
+def meridian_flash_get(f: MeridianFlashTier, key_hash: Int) -> Str:
+    mut i := 0
+    while i < list_len(f.key_hashes):
+        if f.key_hashes[i] == key_hash:
+            return f.disk_data[i]
+        i = i + 1
+    return ""
+
+def meridian_flash_record_read(
+    f: MeridianFlashTier,
+    key_hash: Int
+) -> MeridianFlashTier:
+    mut next_hits := list_new()
+    mut promo_inc := 0
+    
+    mut i := 0
+    while i < list_len(f.key_hashes):
+        if f.key_hashes[i] == key_hash:
+            new_hits := f.hit_counts[i] + 1
+            list_push(next_hits, new_hits)
+            if new_hits >= 2:
+                promo_inc = 1
+        else:
+            list_push(next_hits, f.hit_counts[i])
+        i = i + 1
+        
+    return MeridianFlashTier(
+        f.key_hashes,
+        f.disk_offsets,
+        f.payload_lens,
+        next_hits,
+        f.disk_data,
+        f.total_spills,
+        f.total_reads + 1,
+        f.total_promos + promo_inc
+    )
+
+def meridian_flash_count(f: MeridianFlashTier) -> Int:
+    return list_len(f.key_hashes)
+
+
 
 
 
