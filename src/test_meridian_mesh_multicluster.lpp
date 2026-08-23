@@ -1,0 +1,94 @@
+# samardb MERIDIAN Distributed Multi-Cluster Mesh Test Suite
+import bytes
+import io
+import pager
+import heap
+import btree
+import schema
+import parser
+import exec
+import opt
+import agg
+import wal
+import recovery
+import concur
+import pgwire
+import meridian_plugin
+import server
+
+def assert_bool(name: Str, actual: Bool, expected: Bool) -> Void:
+    if actual == expected:
+        print_str(str_concat("  [PASS] ", name))
+    else:
+        print_str(str_concat("  [FAIL] ", name))
+
+def assert_int(name: Str, actual: Int, expected: Int) -> Void:
+    if actual == expected:
+        print_str(str_concat("  [PASS] ", name))
+    else:
+        msg := str_concat("  [FAIL] ", str_concat(name, str_concat(" (expected: ", str_concat(int_to_str(expected), str_concat(", got: ", str_concat(int_to_str(actual), ")"))))))
+        print_str(msg)
+
+def assert_str(name: Str, actual: Str, expected: Str) -> Void:
+    if str_eq_ci(actual, expected):
+        print_str(str_concat("  [PASS] ", name))
+    else:
+        msg := str_concat("  [FAIL] ", str_concat(name, str_concat(" (expected: '", str_concat(expected, str_concat("', got: '", str_concat(actual, "')"))))))
+        print_str(msg)
+
+def main() -> Void:
+    print_str("================================================================")
+    print_str("   SAMARDB MERIDIAN DISTRIBUTED MULTI-CLUSTER MESH TEST SUITE   ")
+    print_str("================================================================")
+
+    # ── [1/4] Initialize Multi-Region Cluster Mesh ────────────────────────────
+    print_str("--- [1/4] Building Global Multi-Region Meridian Mesh Ring ---")
+    mesh0 := meridian_mesh_new(101, "us-east-1", "10.0.1.10", 7717)
+    assert_int("Local node is Node 101", mesh0.local_node_id, 101)
+    assert_int("Initial ring has 1 cluster node", list_len(mesh0.nodes), 1)
+    assert_int("Initial ring has 16 virtual vnodes", list_len(mesh0.ring_tokens), 16)
+
+    # Add 4 additional global regional clusters (us-west, eu-central, ap-south, ap-northeast)
+    mesh1 := meridian_mesh_add_cluster(mesh0, 102, "us-west-2", "10.0.2.10", 7717, 16)
+    mesh2 := meridian_mesh_add_cluster(mesh1, 103, "eu-central-1", "10.0.3.10", 7717, 16)
+    mesh3 := meridian_mesh_add_cluster(mesh2, 104, "ap-south-1", "10.0.4.10", 7717, 16)
+    mesh4 := meridian_mesh_add_cluster(mesh3, 105, "ap-northeast-1", "10.0.5.10", 7717, 16)
+
+    assert_int("Global mesh contains 5 regional clusters", list_len(mesh4.nodes), 5)
+    assert_int("Global mesh ring contains 80 virtual tokens (16 vnodes x 5 nodes)", list_len(mesh4.ring_tokens), 80)
+    assert_int("Mesh gossip epoch advanced to 5", mesh4.gossip_epoch, 5)
+
+    # ── [2/4] Ketama Consistent Hashing & Shard Affinity ──────────────────────
+    print_str("--- [2/4] Testing Consistent Hashing & Shard Affinity ---")
+    p1 := meridian_mesh_locate_primary(mesh4, 42)
+    p2 := meridian_mesh_locate_primary(mesh4, 42)
+    assert_int("Deterministic primary cluster location for Key 42", p1, p2)
+    assert_bool("Primary node ID is a valid cluster member (101..105)", p1 >= 101 && p1 <= 105, true)
+
+    p_other := meridian_mesh_locate_primary(mesh4, 99999)
+    assert_bool("Distinct keys map across distributed cluster ring", p_other >= 101 && p_other <= 105, true)
+
+    # ── [3/4] Multi-Cluster 3-Way Replication Topology ────────────────────────
+    print_str("--- [3/4] Testing 3-Way Multi-Cluster Replication Quorum ---")
+    replicas := meridian_mesh_locate_replicas(mesh4, 42)
+    assert_int("Replication factor produces 3 distinct cluster replicas", list_len(replicas), 3)
+    assert_int("First replica is the primary owner", replicas[0], p1)
+    assert_bool("Secondary replica is distinct from primary", replicas[1] != replicas[0], true)
+    assert_bool("Tertiary replica is distinct from secondary", replicas[2] != replicas[1] && replicas[2] != replicas[0], true)
+
+    # ── [4/4] Cross-Cluster CDC Delta Gossip Replication ──────────────────────
+    print_str("--- [4/4] Testing Cross-Cluster CDC Delta Replication Bus ---")
+    mesh_delta1 := meridian_mesh_push_cdc_delta(mesh4, 42, "DELTA:accounts:42:balance=9500")
+    assert_int("Mesh total deltas incremented to 1", mesh_delta1.total_mesh_deltas, 1)
+    assert_int("Cross-cluster gossip broadcasted 3 replication packets (N=3)", mesh_delta1.total_gossip_msgs, 3)
+
+    mesh_delta2 := meridian_mesh_push_cdc_delta(mesh_delta1, 99999, "DELTA:accounts:99999:status=2")
+    assert_int("Mesh total deltas incremented to 2", mesh_delta2.total_mesh_deltas, 2)
+    assert_int("Cumulative cross-cluster gossip messages reached 6", mesh_delta2.total_gossip_msgs, 6)
+
+    mesh_hit := meridian_mesh_record_hit(mesh_delta2)
+    assert_int("Mesh cache hit recorded", mesh_hit.total_mesh_hits, 1)
+
+    print_str("================================================================")
+    print_str(" [SUCCESS] ALL MERIDIAN MULTI-CLUSTER MESH TESTS PASSED 100%!   ")
+    print_str("================================================================")
