@@ -28,13 +28,13 @@ def PLAN_INDEXSCAN() -> Int:
     return 2
 
 def PLAN_NLJ() -> Int:
-    return 3
+    return 5
 
 def PLAN_HASH_JOIN() -> Int:
-    return 4
+    return 6
 
 def PLAN_MERGE_JOIN() -> Int:
-    return 5
+    return 7
 
 # ── Table Statistics ──────────────────────────────────────────────────────────
 # Parallel lists keyed by index position
@@ -135,7 +135,9 @@ def estimate_selectivity(sc: StatCatalog, tbl: Str, col: Str, op: Int, val: Int)
         if ndv <= 0:
             return 10000
         return 10000 / ndv
-    if op == OP_GT() || op == OP_GTE() || op == OP_LT() || op == OP_LTE():
+    if op == OP_GT() || op == OP_GTE():
+        return 6666
+    if op == OP_LT() || op == OP_LTE():
         return 3333
     if op == OP_NEQ():
         eq_sel := estimate_selectivity(sc, tbl, col, OP_EQ(), val)
@@ -146,7 +148,7 @@ def estimate_selectivity(sc: StatCatalog, tbl: Str, col: Str, op: Int, val: Int)
 def estimate_scan_cost(sc: StatCatalog, tbl: Str, col: Str, op: Int) -> Tuple[Int, Bool]:
     n_pages := stats_get_n_pages(sc, tbl)
     n_tuples := stats_get_n_tuples(sc, tbl)
-    seq_cost := n_pages * PAGE_FETCH_COST() + n_tuples * CPU_COST()
+    seq_cost := n_pages * PAGE_FETCH_COST()
 
     if op != OP_NONE() && stats_has_index(sc, tbl, col):
         levels := stats_get_idx_levels(sc, tbl, col)
@@ -217,37 +219,41 @@ def opt_plan_query(sc: StatCatalog, pq: ParsedQuery) -> PlanNode:
         join_tbl := pq.join_table_name
         join_n_tuples := stats_get_n_tuples(sc, join_tbl)
 
-        has_left_idx := stats_has_index(sc, tbl, pq.join_left_col)
-        has_right_idx := stats_has_index(sc, join_tbl, pq.join_right_col)
-        
-        # Evaluate Join strategy
-        algo := join_cost_evaluate(est_rows, join_n_tuples, has_left_idx, has_right_idx)
-        mut plan_join_type := PLAN_NLJ()
-        mut best_cost := total_cost + est_rows * join_n_tuples
-        
-        if algo == JOIN_MERGE():
-            plan_join_type = PLAN_MERGE_JOIN()
-            best_cost = total_cost + (est_rows + join_n_tuples) * CPU_COST()
-        elif algo == JOIN_HASH():
-            plan_join_type = PLAN_HASH_JOIN()
-            best_cost = total_cost + (est_rows + join_n_tuples * 2) * CPU_COST()
+        (inner_a_cost, _) := estimate_scan_cost(sc, join_tbl, "", OP_NONE())
+        plan_a_cost := total_cost + est_rows * inner_a_cost
 
-        mut join_est_rows := est_rows * join_n_tuples / 10
-        if join_est_rows < 1:
-            join_est_rows = 1
+        join_sel_frac := estimate_selectivity(sc, join_tbl, pq.where_col_name, pq.where_op, pq.where_val)
+        mut join_est_outer := join_n_tuples * join_sel_frac / 10000
+        if join_est_outer < 1:
+            join_est_outer = 1
+        plan_b_cost := inner_a_cost + join_est_outer * total_cost
+
+        mut best_cost := plan_a_cost
+        mut outer_tbl := tbl
+        mut inner_tbl := join_tbl
+        mut outer_rows := est_rows
+        if plan_b_cost < plan_a_cost:
+            best_cost = plan_b_cost
+            outer_tbl = join_tbl
+            inner_tbl = tbl
+            outer_rows = join_est_outer
+
+        mut nlj_est_rows := outer_rows * join_n_tuples / 10
+        if nlj_est_rows < 1:
+            nlj_est_rows = 1
 
         return plan_node_new(
-            plan_join_type,
-            tbl,
+            PLAN_NLJ(),
+            outer_tbl,
             pq.col_names,
             pq.where_col_name,
             pq.where_op,
             pq.where_val,
-            join_tbl,
+            inner_tbl,
             pq.join_left_col,
             pq.join_right_col,
             best_cost,
-            join_est_rows
+            nlj_est_rows
         )
 
     # 4. Single-table scan
@@ -265,6 +271,9 @@ def opt_plan_query(sc: StatCatalog, pq: ParsedQuery) -> PlanNode:
         est_rows
     )
 
+def optimize(sc: StatCatalog, pq: ParsedQuery) -> PlanNode:
+    return opt_plan_query(sc, pq)
+
 # ── Plan Explain Helper ───────────────────────────────────────────────────────
 def explain_plan(plan: PlanNode) -> Str:
     mut out := ""
@@ -275,7 +284,7 @@ def explain_plan(plan: PlanNode) -> Str:
         out = str_concat("IndexScan(", plan.table_name)
         out = str_concat(out, ")")
     elif plan.node_type == PLAN_NLJ():
-        out = str_concat("NestedLoopJoin(outer=", plan.table_name)
+        out = str_concat("NLJ(outer=", plan.table_name)
         out = str_concat(out, str_concat(", inner=", plan.join_tbl))
         out = str_concat(out, ")")
     elif plan.node_type == PLAN_HASH_JOIN():

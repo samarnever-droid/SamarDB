@@ -1,4 +1,4 @@
-# samardb Phase 5 Test Suite: Cost-Based Query Optimizer
+﻿# samardb Phase 5 Test Suite
 # Verifies: statistics catalog, selectivity estimation, scan selection,
 #           join ordering, predicate pushdown, and plan explain.
 
@@ -16,7 +16,7 @@ import parser
 import exec
 import opt
 
-# ── Test Framework ────────────────────────────────────────────────────────────
+# ------ Test Framework ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 def check_int_pass(got: Int, want: Int) -> Bool:
     return got == want
 
@@ -43,7 +43,7 @@ def cb(label: Str, got: Bool, want: Bool) -> Int:
 def cs(label: Str, got: Str, want: Str) -> Int:
     return record_check(label, check_str_pass(got, want))
 
-# ── Build shared StatCatalog ─────────────────────────────────────────────────
+# ------ Build shared StatCatalog ---------------------------------------------------------------------------------------------------------------------------------------------------
 def make_stat_catalog() -> StatCatalog:
     mut sc := stat_catalog_new()
     sc = stats_add_table(sc, "employees", 100, 10000)
@@ -56,7 +56,7 @@ def make_stat_catalog() -> StatCatalog:
     sc = stats_add_column(sc, "departments", "budget", 20, 0)
     return sc
 
-# ── [1/4] Statistics Catalog ─────────────────────────────────────────────────
+# ------ [1/4] Statistics Catalog ---------------------------------------------------------------------------------------------------------------------------------------------------
 def test_statistics_catalog() -> Int:
     print_str("--- [1/4] Testing Statistics Catalog Lookups ---")
     sc := make_stat_catalog()
@@ -72,7 +72,7 @@ def test_statistics_catalog() -> Int:
     p = p + ci("unknown table n_tuples fallback is 1", stats_get_n_tuples(sc, "ghosts"), 1)
     return p
 
-# ── [2/4] Selectivity Estimation ─────────────────────────────────────────────
+# ------ [2/4] Selectivity Estimation ---------------------------------------------------------------------------------------------------------------------------------------
 def test_selectivity() -> Int:
     print_str("--- [2/4] Testing Selectivity Estimation ---")
     sc := make_stat_catalog()
@@ -91,7 +91,7 @@ def test_selectivity() -> Int:
         estimate_selectivity(sc, "employees", "zzz", OP_EQ(), 0), 10000)
     return p
 
-# ── [3/4] Scan Selection ──────────────────────────────────────────────────────
+# ------ [3/4] Scan Selection ------------------------------------------------------------------------------------------------------------------------------------------------------------------
 def test_scan_selection() -> Int:
     print_str("--- [3/4] Testing Scan Selection (SeqScan vs IndexScan) ---")
     sc := make_stat_catalog()
@@ -108,24 +108,24 @@ def test_scan_selection() -> Int:
     p = p + cb("departments.id scan cost >= 0", cost_dep >= 0, true)
     return p
 
-# ── [4/4] Optimizer End-to-End Plans ─────────────────────────────────────────
+# ------ [4/4] Optimizer End-to-End Plans ---------------------------------------------------------------------------------------------------------------------------
 def test_optimizer_plans() -> Int:
     print_str("--- [4/4] Testing Optimizer End-to-End Plan Generation ---")
     sc := make_stat_catalog()
     mut p := 0
-    # Q1: PK equality → IndexScan
+    # Q1: PK equality --- IndexScan
     pq_one := sql_parse("SELECT id FROM employees WHERE id = 42")
     plan_one := optimize(sc, pq_one)
     p = p + ci("Q1: IndexScan chosen (PLAN_INDEXSCAN=2)", plan_one.node_type, PLAN_INDEXSCAN())
     p = p + cs("Q1: table is employees", plan_one.table_name, "employees")
     p = p + ci("Q1: where_op is OP_EQ (1)", plan_one.where_op, OP_EQ())
     p = p + cb("Q1: cost > 0", plan_one.est_cost > 0, true)
-    # Q2: full table → SeqScan
+    # Q2: full table --- SeqScan
     pq_two := sql_parse("SELECT id FROM employees")
     plan_two := optimize(sc, pq_two)
     p = p + ci("Q2: SeqScan chosen (PLAN_SEQSCAN=1)", plan_two.node_type, PLAN_SEQSCAN())
     p = p + ci("Q2: est_rows is 10000 (full table)", plan_two.est_rows, 10000)
-    # Q3: JOIN → NLJ
+    # Q3: JOIN --- NLJ
     pq_three := sql_parse("SELECT id FROM employees JOIN departments ON dept_id = id WHERE id > 100")
     plan_three := optimize(sc, pq_three)
     p = p + ci("Q3: NLJ plan chosen (PLAN_NLJ=5)", plan_three.node_type, PLAN_NLJ())
@@ -138,7 +138,7 @@ def test_optimizer_plans() -> Int:
     p = p + cb("Q1 explain non-empty", str_len(exp_one) > 0, true)
     p = p + cb("Q2 explain non-empty", str_len(exp_two) > 0, true)
     p = p + cb("Q3 explain non-empty", str_len(exp_three) > 0, true)
-    # Q5: non-indexed dept_id → SeqScan
+    # Q5: non-indexed dept_id --- SeqScan
     pq_five := sql_parse("SELECT dept_id FROM employees WHERE dept_id = 5")
     plan_five := optimize(sc, pq_five)
     p = p + ci("Q5: SeqScan on non-indexed dept_id", plan_five.node_type, PLAN_SEQSCAN())
