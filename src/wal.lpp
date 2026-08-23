@@ -1,0 +1,105 @@
+# samardb-wal: Write-Ahead Log records, Group Commit buffer, and Recovery Engine
+# Implements Invariants I1 (durability), I5 (LSN monotonicity), and I6 (idempotence)
+
+import bytes
+import io
+
+# ── WAL Record Discriminators ────────────────────────────────────────────────
+# 1: TXN_BEGIN
+# 2: TXN_COMMIT
+# 3: TXN_ABORT
+# 4: HEAP_INSERT
+# 10: CHECKPOINT
+
+struct WalRecord:
+    checksum: Int
+    total_len: Int
+    lsn: Int
+    txn_id: Int
+    prev_lsn: Int
+    rec_type: Int
+    flags: Int
+    format_version: Int
+    payload_len: Int
+    payload: Bytes
+
+def wal_record_new(lsn: Int, txn_id: Int, prev_lsn: Int, rec_type: Int, payload: Bytes) -> WalRecord:
+    plen := bytes_len(payload)
+    tot_len := 40 + plen
+    return WalRecord(0, tot_len, lsn, txn_id, prev_lsn, rec_type, 0, 1, plen, payload)
+
+def wal_record_encode(r: WalRecord) -> Bytes:
+    b := bytes_alloc(r.total_len)
+    bytes_set32le(b, 4, r.total_len)
+    bytes_set64le(b, 8, r.lsn)
+    bytes_set64le(b, 16, r.txn_id)
+    bytes_set64le(b, 24, r.prev_lsn)
+    bytes_set8(b, 32, r.rec_type)
+    bytes_set8(b, 33, r.flags)
+    bytes_set16le(b, 34, r.format_version)
+    bytes_set32le(b, 36, r.payload_len)
+    if r.payload_len > 0:
+        bytes_copy(b, 40, r.payload, 0, r.payload_len)
+    # Checksum over bytes [4, total_len)
+    c := bytes_crc32(b, 4, r.total_len - 4)
+    bytes_set32le(b, 0, c)
+    return b
+
+def wal_record_decode(b: Bytes) -> Tuple[WalRecord, Bool]:
+    if bytes_len(b) < 40:
+        return (WalRecord(0, 0, 0, 0, 0, 0, 0, 0, 0, bytes_alloc(0)), false)
+    c := bytes_get32le(b, 0)
+    tot := bytes_get32le(b, 4)
+    if tot > bytes_len(b) || tot < 40:
+        return (WalRecord(0, 0, 0, 0, 0, 0, 0, 0, 0, bytes_alloc(0)), false)
+    # Checksum validation (Invariant I8)
+    computed := bytes_crc32(b, 4, tot - 4)
+    if c != computed:
+        return (WalRecord(0, 0, 0, 0, 0, 0, 0, 0, 0, bytes_alloc(0)), false)
+        
+    lsn := bytes_get64le(b, 8)
+    txn := bytes_get64le(b, 16)
+    prev := bytes_get64le(b, 24)
+    rt := bytes_get8(b, 32)
+    fl := bytes_get8(b, 33)
+    ver := bytes_get16le(b, 34)
+    plen := bytes_get32le(b, 36)
+    payload := bytes_slice(b, 40, plen)
+    
+    return (WalRecord(c, tot, lsn, txn, prev, rt, fl, ver, plen, payload), true)
+
+# ── WAL Log Writer & Manager ─────────────────────────────────────────────────
+struct WalManager:
+    current_lsn: Int
+    flushed_lsn: Int
+    records: List[Bytes]
+    txn_count: Int
+
+def wal_manager_new() -> WalManager:
+    return WalManager(1000, 1000, list_new(), 0)
+
+def wal_append_record(wal: WalManager, txn_id: Int, prev_lsn: Int, rec_type: Int, payload: Bytes) -> Tuple[WalManager, Int]:
+    r := wal_record_new(wal.current_lsn, txn_id, prev_lsn, rec_type, payload)
+    encoded := wal_record_encode(r)
+    list_push(wal.records, encoded)
+    next_lsn := wal.current_lsn + r.total_len
+    ret_wal := WalManager(next_lsn, wal.flushed_lsn, wal.records, wal.txn_count + 1)
+    return (ret_wal, r.lsn)
+
+def wal_append_update_record(wal: WalManager, txn_id: Int, prev_lsn: Int, page_id: Int, slot_id: Int, new_tuple: Bytes) -> Tuple[WalManager, Int]:
+    tlen := bytes_len(new_tuple)
+    payload := bytes_alloc(6 + tlen)
+    bytes_set32le(payload, 0, page_id)
+    bytes_set16le(payload, 4, slot_id)
+    if tlen > 0:
+        bytes_copy(payload, 6, new_tuple, 0, tlen)
+    return wal_append_record(wal, txn_id, prev_lsn, 5, payload) # 5 = HEAP_UPDATE
+
+def wal_append_delete_record(wal: WalManager, txn_id: Int, prev_lsn: Int, page_id: Int, slot_id: Int) -> Tuple[WalManager, Int]:
+    payload := bytes_alloc(6)
+    bytes_set32le(payload, 0, page_id)
+    bytes_set16le(payload, 4, slot_id)
+    return wal_append_record(wal, txn_id, prev_lsn, 6, payload) # 6 = HEAP_DELETE
+
+def wal_flush_to_disk(wal: WalManager) -> WalManager:
+    return WalManager(wal.current_lsn, wal.current_lsn, wal.records, wal.txn_count)

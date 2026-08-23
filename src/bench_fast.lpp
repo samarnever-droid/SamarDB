@@ -1,0 +1,93 @@
+# Quick test of in-place O(1) cache speed in L++
+
+def hc_hash_str(s: Str) -> Int:
+    mut h := 5381
+    mut i := 0
+    L := str_len(s)
+    while i < L:
+        ch := ord(char_at(s, i))
+        h = ((h * 33) + ch) % 2147483647
+        i = i + 1
+    if h < 0:
+        h = 0 - h
+    return h
+
+struct FlatCache:
+    keys: List[Str]
+    vals: List[Str]
+    hashes: List[Int]
+    cap: Int
+    mask: Int
+    hits: Int
+    misses: Int
+
+def flat_cache_new(cap: Int) -> FlatCache:
+    keys := list_new()
+    vals := list_new()
+    hashes := list_new()
+    mut i := 0
+    while i < cap:
+        list_push(keys, "")
+        list_push(vals, "")
+        list_push(hashes, 0)
+        i = i + 1
+    return FlatCache(keys, vals, hashes, cap, cap - 1, 0, 0)
+
+def flat_cache_set(c: FlatCache, key: Str, val: Str) -> FlatCache:
+    kh := hc_hash_str(key)
+    mut slot := kh % c.cap
+    mut keys := c.keys
+    mut vals := c.vals
+    mut hashes := c.hashes
+    while str_len(keys[slot]) > 0 && keys[slot] != key:
+        slot = (slot + 1) % c.cap
+    keys[slot] = key
+    vals[slot] = val
+    hashes[slot] = kh
+    return c
+
+def flat_cache_get(c: FlatCache, key: Str) -> Tuple[FlatCache, Str, Bool]:
+    kh := hc_hash_str(key)
+    mut slot := kh % c.cap
+    keys := c.keys
+    vals := c.vals
+    hashes := c.hashes
+    mut probes := 0
+    while probes < c.cap:
+        if str_len(keys[slot]) == 0:
+            return (FlatCache(keys, vals, hashes, c.cap, c.mask, c.hits, c.misses + 1), "", false)
+        if hashes[slot] == kh && keys[slot] == key:
+            return (FlatCache(keys, vals, hashes, c.cap, c.mask, c.hits + 1, c.misses), vals[slot], true)
+        slot = (slot + 1) % c.cap
+        probes = probes + 1
+    return (FlatCache(keys, vals, hashes, c.cap, c.mask, c.hits, c.misses + 1), "", false)
+
+def main():
+    print_str("Testing 100,000 in-place O(1) ops in L++...\n")
+    mut c := flat_cache_new(1024)
+    mut i := 0
+    while i < 200:
+        c = flat_cache_set(c, str_concat("k:", int_to_str(i)), "val_payload")
+        i = i + 1
+
+    t0 := time_ms()
+    mut ops := 0
+    while ops < 100000:
+        k := str_concat("k:", int_to_str(ops % 200))
+        (c_after, _, _) := flat_cache_get(c, k)
+        c = c_after
+        ops = ops + 1
+    mut dt := time_ms() - t0
+    if dt == 0:
+        dt = 1
+    throughput := (100000 * 1000) / dt
+
+    print_str("Elapsed: ")
+    print(dt)
+    print_str(" ms\n")
+    print_str("Throughput: ")
+    print(throughput)
+    print_str(" ops/sec\n")
+    print_str("Hits: ")
+    print(c.hits)
+    print_str("\n")

@@ -1,0 +1,138 @@
+# samardb Phase 9 Test Suite: Performance & Benchmark Harness
+# Verifies: deterministic latency percentile calculations (p50/p95/p99),
+#           microbenchmark workloads for B+ Tree, Heap, Volcano, and Optimizer.
+
+import bytes
+import pager
+import heap
+import btree
+import schema
+import parser
+import exec
+import opt
+import bench
+
+# ── Test Framework ────────────────────────────────────────────────────────────
+def ci(label: Str, got: Int, want: Int) -> Int:
+    if got == want:
+        print_str(str_concat("  [PASS] ", label))
+        return 1
+    else:
+        out := str_concat("  [FAIL] ", label)
+        out2 := str_concat(out, str_concat("  got=", int_to_str(got)))
+        print_str(str_concat(out2, str_concat(" want=", int_to_str(want))))
+        return 0
+
+def cb(label: Str, got: Bool, want: Bool) -> Int:
+    ok := (got && want) || (!got && !want)
+    if ok:
+        print_str(str_concat("  [PASS] ", label))
+        return 1
+    else:
+        print_str(str_concat("  [FAIL] ", label))
+        return 0
+
+def cs(label: Str, got: Str, want: Str) -> Int:
+    if str_eq_ci(got, want):
+        print_str(str_concat("  [PASS] ", label))
+        return 1
+    else:
+        out := str_concat("  [FAIL] ", label)
+        out2 := str_concat(out, str_concat("  got='", got))
+        print_str(str_concat(out2, str_concat("' want='", str_concat(want, "'"))))
+        return 0
+
+# ── [1/5] Latency Histogram & Percentile Calculations ─────────────────────────
+def test_stats_percentiles() -> Int:
+    print_str("--- [1/5] Testing Latency Histogram & Percentile Math ---")
+    mut p := 0
+    mut bs := bench_stats_new()
+
+    # Record 20 samples: 10, 20, 30, ... 200
+    mut i := 1
+    while i <= 20:
+        bs = bench_stats_record(bs, i * 10)
+        i = i + 1
+
+    p = p + ci("Recorded exactly 20 samples", len(bs.samples), 20)
+    # Sum: 10 + 20 + ... + 200 = 2100
+    p = p + ci("Total latency is 2100 ticks", bench_stats_total(bs), 2100)
+    # Avg: 2100 / 20 = 105
+    p = p + ci("Average latency is 105 ticks", bench_stats_avg(bs), 105)
+    # p50 (index 10): 110
+    p = p + ci("p50 latency is 110 ticks", bench_stats_p50(bs), 110)
+    # p95 (index 19): 200
+    p = p + ci("p95 latency is 200 ticks", bench_stats_p95(bs), 200)
+    # p99 (index 19): 200
+    p = p + ci("p99 latency is 200 ticks", bench_stats_p99(bs), 200)
+    return p
+
+# ── [2/5] B+ Tree Point Lookup Benchmark ──────────────────────────────────────
+def test_btree_point_lookup_bench() -> Int:
+    print_str("--- [2/5] Testing B+ Tree Point Lookup Benchmark ---")
+    mut p := 0
+    res := run_bench_point_lookup(50)
+
+    p = p + cs("Benchmark name is BTree_PointLookup", res.name, "BTree_PointLookup")
+    p = p + ci("Executed 50 lookup operations", res.op_count, 50)
+    p = p + ci("100% cache/index hit ratio", res.hit_ratio_pct, 100)
+    p = p + ci("50 cache hits recorded", res.cache_hits, 50)
+    p = p + ci("0 cache misses", res.cache_misses, 0)
+    p = p + cb("p50 latency bounded between 10 and 20 ticks", res.p50 >= 10 && res.p50 <= 20, true)
+    p = p + cb("p99 latency <= 25 ticks", res.p99 <= 25, true)
+    return p
+
+# ── [3/5] Slotted Heap Insert Benchmark ───────────────────────────────────────
+def test_heap_insert_bench() -> Int:
+    print_str("--- [3/5] Testing Slotted Heap Insert Benchmark ---")
+    mut p := 0
+    res := run_bench_heap_insert(25)
+
+    p = p + cs("Benchmark name is Heap_Insert", res.name, "Heap_Insert")
+    p = p + ci("Inserted 25 tuples", res.op_count, 25)
+    p = p + cb("Average insert latency between 20 and 30 ticks", res.avg_latency >= 20 && res.avg_latency <= 30, true)
+    p = p + cb("p95 latency <= 30 ticks", res.p95 <= 30, true)
+    p = p + ci("100% insertion success ratio", res.hit_ratio_pct, 100)
+    return p
+
+# ── [4/5] Volcano Relational Pipeline Benchmark ───────────────────────────────
+def test_volcano_query_bench() -> Int:
+    print_str("--- [4/5] Testing Volcano Relational Pipeline Benchmark ---")
+    mut p := 0
+    res := run_bench_volcano_query(30)
+
+    p = p + cs("Benchmark name is Volcano_FilterProject", res.name, "Volcano_FilterProject")
+    p = p + ci("Executed 30 query pipeline iterations", res.op_count, 30)
+    p = p + cb("Avg query latency between 45 and 55 ticks", res.avg_latency >= 45 && res.avg_latency <= 55, true)
+    p = p + cb("p99 query latency <= 60 ticks", res.p99 <= 60, true)
+    return p
+
+# ── [5/5] Query Optimizer Plan Generation Benchmark ───────────────────────────
+def test_optimizer_bench() -> Int:
+    print_str("--- [5/5] Testing Query Optimizer Plan Generation Benchmark ---")
+    mut p := 0
+    res := run_bench_optimizer(40)
+
+    p = p + cs("Benchmark name is Optimizer_PlanGen", res.name, "Optimizer_PlanGen")
+    p = p + ci("Generated 40 physical execution plans", res.op_count, 40)
+    p = p + cb("Avg plan cost estimation between 30 and 40 ticks", res.avg_latency >= 30 && res.avg_latency <= 40, true)
+    p = p + cb("p95 optimizer latency <= 45 ticks", res.p95 <= 45, true)
+    return p
+
+def main():
+    print_str("================================================================")
+    print_str("    SamarDB Phase 9 Performance & Microbenchmark Suite         ")
+    print_str("================================================================")
+    p_one := test_stats_percentiles()
+    p_two := test_btree_point_lookup_bench()
+    p_three := test_heap_insert_bench()
+    p_four := test_volcano_query_bench()
+    p_five := test_optimizer_bench()
+    total := p_one + p_two + p_three + p_four + p_five
+    print_str("================================================================")
+    if total >= 25:
+        print_str(str_concat(" [SUCCESS] All ", str_concat(int_to_str(total), " SamarDB Phase 9 Benchmark Assertions Passed!")))
+    else:
+        failed := 25 - total
+        print_str(str_concat(" [FAILED] ", str_concat(int_to_str(failed), str_concat(" failures, ", str_concat(int_to_str(total), " passed")))))
+    print_str("================================================================")

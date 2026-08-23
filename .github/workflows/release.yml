@@ -1,0 +1,107 @@
+﻿name: Release SamarDB
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version tag (e.g. v1.0.0)"
+        required: true
+        default: "v1.0.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: "Build SamarDB Release (${{ matrix.os }})"
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact_name: samardb-windows-x86_64
+            archive_ext: zip
+          - os: ubuntu-latest
+            artifact_name: samardb-linux-x86_64
+            archive_ext: tar.gz
+          - os: macos-latest
+            artifact_name: samardb-macos-arm64
+            archive_ext: tar.gz
+
+    steps:
+      - name: Checkout SamarDB Repository
+        uses: actions/checkout@v4
+
+      - name: Setup L++ Pure Native AOT Toolchain
+        shell: bash
+        run: |
+          echo "Installing latest L++ compiler..."
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            powershell.exe -Command "irm https://lplusplus.bond/install.ps1 | iex"
+            echo "$HOME/.lpp/bin" >> $GITHUB_PATH
+          elif [[ "${{ runner.os }}" == "macOS" ]]; then
+            curl -fsSL https://lplusplus.bond/install.sh | bash
+            echo "$HOME/.lpp/bin" >> $GITHUB_PATH
+          else
+            curl -fsSL https://lplusplus.bond/install.sh | bash
+            echo "$HOME/.lpp/bin" >> $GITHUB_PATH
+          fi
+
+      - name: Compile SamarDB Engine Suite
+        shell: bash
+        run: |
+          lpp --version
+          mkdir -p dist/bin
+          lpp src/test_5000_quadrant.lpp
+          lpp src/test_cluster_raft.lpp
+          lpp src/test_father_chaos.lpp
+          lpp src/test_pg_benchmark.lpp
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cp src/*.exe dist/bin/
+          else
+            cp src/test_5000_quadrant src/test_cluster_raft src/test_father_chaos src/test_pg_benchmark dist/bin/ 2>/dev/null || true
+          fi
+          cp -r docs dist/ 2>/dev/null || true
+          cp README.md dist/ 2>/dev/null || true
+
+      - name: Package Release Archive
+        shell: bash
+        run: |
+          mkdir -p staging
+          if [[ "${{ matrix.archive_ext }}" == "zip" ]]; then
+            powershell.exe -Command "Compress-Archive -Path dist/* -DestinationPath staging/${{ matrix.artifact_name }}.zip -Force"
+          else
+            tar -czf staging/${{ matrix.artifact_name }}.tar.gz -C dist .
+          fi
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: staging/*
+
+  publish:
+    name: "Publish GitHub Release"
+    needs: build-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Download All Release Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/samardb-windows-x86_64/*
+            artifacts/samardb-linux-x86_64/*
+            artifacts/samardb-macos-arm64/*
+          generate_release_notes: true

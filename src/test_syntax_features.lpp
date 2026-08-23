@@ -1,0 +1,93 @@
+# Test new L++ syntax features: list[i] = val, list[i] += val, for in, range
+def assert_int(name: Str, actual: Int, expected: Int) -> Int:
+    if actual == expected:
+        print_str("  [PASS] ")
+        print_str(name)
+        print_str("\n")
+        return 1
+    print_str("  [FAIL] ")
+    print_str(name)
+    print_str(" (expected ")
+    print(expected)
+    print_str(", got ")
+    print(actual)
+    print_str(")\n")
+    return 0
+
+def main() -> Int:
+    print_str("================================================================\n")
+    print_str("        L++ Extended Syntax & List Index Assignment Test        \n")
+    print_str("================================================================\n")
+    mut passed := 0
+
+    # 1. Test in-place list indexing assignment: list[idx] = val
+    mut numbers := list_new()
+    list_push(numbers, 10)
+    list_push(numbers, 20)
+    list_push(numbers, 30)
+
+    # In-place overwrite index 1
+    numbers[1] = 99
+    passed = passed + assert_int("numbers[1] overwritten to 99", numbers[1], 99)
+    passed = passed + assert_int("numbers[0] unchanged (10)", numbers[0], 10)
+    passed = passed + assert_int("numbers[2] unchanged (30)", numbers[2], 30)
+
+    # 2. Test augmented indexed assignment: list[idx] += val
+    numbers[0] += 5
+    passed = passed + assert_int("numbers[0] += 5 is 15", numbers[0], 15)
+
+    numbers[2] -= 10
+    passed = passed + assert_int("numbers[2] -= 10 is 20", numbers[2], 20)
+
+    # 3. Test for-in loop over list
+    mut total := 0
+    for n in numbers:
+        total = total + n
+    passed = passed + assert_int("for-in loop sum (15 + 99 + 20) is 134", total, 134)
+
+    # 4. Test for-range loop: for i in range(1, 6)
+    mut range_sum := 0
+    for i in range(1, 6):
+        range_sum = range_sum + i
+    passed = passed + assert_int("for i in range(1, 6) sum is 15", range_sum, 15)
+
+    # 5. Test direct list_set builtin
+    list_set(numbers, 1, 500)
+    passed = passed + assert_int("list_set(numbers, 1, 500) sets index 1", numbers[1], 500)
+
+    # 6. Test list in-place sort using list[i] = val
+    mut sort_me := list_new()
+    list_push(sort_me, 50)
+    list_push(sort_me, 20)
+    list_push(sort_me, 40)
+    list_push(sort_me, 10)
+    list_push(sort_me, 30)
+
+    # Bubble sort using list[idx] = val
+    mut i := 0
+    while i < 5:
+        mut j := 0
+        while j < 4:
+            if sort_me[j] > sort_me[j + 1]:
+                temp := sort_me[j]
+                sort_me[j] = sort_me[j + 1]
+                sort_me[j + 1] = temp
+            j = j + 1
+        i = i + 1
+
+    passed = passed + assert_int("sort_me[0] is 10", sort_me[0], 10)
+    passed = passed + assert_int("sort_me[1] is 20", sort_me[1], 20)
+    passed = passed + assert_int("sort_me[2] is 30", sort_me[2], 30)
+    passed = passed + assert_int("sort_me[3] is 40", sort_me[3], 40)
+    passed = passed + assert_int("sort_me[4] is 50", sort_me[4], 50)
+
+    print_str("================================================================\n")
+    print_str("  Total Syntax Assertions Passed: ")
+    print(passed)
+    print_str(" / 13\n")
+    if passed == 13:
+        print_str(" [SUCCESS] All 13/13 New L++ Syntax Assertions Passed!\n")
+    else:
+        print_str(" [FAILURE] Some syntax assertions failed.\n")
+    print_str("================================================================\n")
+    return 0

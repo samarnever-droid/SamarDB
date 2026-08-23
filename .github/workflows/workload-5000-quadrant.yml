@@ -1,0 +1,43 @@
+﻿name: SamarDB 5000-Quadrant High-Throughput Relational Workload Matrix
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  quadrant-stress:
+    name: "Quadrant Execution Stress Matrix"
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout SamarDB Repository
+        uses: actions/checkout@v4
+
+      - name: Setup L++ Pure Native AOT Toolchain
+        run: |
+          if (Test-Path bin/lpp.exe) {
+            echo "$((Get-Location).Path)\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          } else {
+            irm https://lplusplus.bond/install.ps1 | iex
+            echo "$HOME\.lpp\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+
+      - name: Verify L++ Installation
+        run: |
+          lpp --version
+
+      - name: Compile 5000-Quadrant Engine Test Suite
+        run: |
+          lpp src/test_5000_quadrant.lpp
+          lpp src/test_pg_benchmark.lpp
+
+      - name: Execute 5,000-Quadrant Stress Run
+        run: |
+          .\src\test_5000_quadrant.exe
+
+      - name: Execute PostgreSQL Comparative Head-to-Head Benchmark
+        run: |
+          .\src\test_pg_benchmark.exe

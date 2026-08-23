@@ -1,0 +1,157 @@
+# High-volume stress test for L++ indexed assignment (list[i] = val, list[i] += val, for in, range)
+
+def print_pass(name: Str) -> Int:
+    print_str("  [PASS] ")
+    print_str(name)
+    print_str("\n")
+    return 1
+
+def print_fail(name: Str, expected: Int, actual: Int) -> Int:
+    print_str("  [FAIL] ")
+    print_str(name)
+    print_str(" (expected ")
+    print(expected)
+    print_str(", got ")
+    print(actual)
+    print_str(")\n")
+    return 0
+
+def check_eq(name: Str, actual: Int, expected: Int) -> Int:
+    if actual == expected:
+        return print_pass(name)
+    return print_fail(name, expected, actual)
+
+# ── Stress Workload 1: 10,000 In-Place Random/Sequential Index Writes ─────────
+def stress_large_list_mutations() -> Int:
+    print_str("--- [1/4] Stressing 10,000 In-Place List Index Mutations ---\n")
+    mut lst := list_new()
+    mut i := 0
+    while i < 10000:
+        list_push(lst, 0)
+        i = i + 1
+
+    # Overwrite all 10,000 indices with values: lst[i] = i * 2 + 1
+    i = 0
+    while i < 10000:
+        lst[i] = (i * 2) + 1
+        i = i + 1
+
+    mut pass := 0
+    pass = pass + check_eq("lst[0] is 1", lst[0], 1)
+    pass = pass + check_eq("lst[5000] is 10001", lst[5000], 10001)
+    pass = pass + check_eq("lst[9999] is 19999", lst[9999], 19999)
+
+    # In-place augmented writes on all 10,000: lst[i] += 10
+    i = 0
+    while i < 10000:
+        lst[i] += 10
+        i = i + 1
+
+    pass = pass + check_eq("lst[0] += 10 is 11", lst[0], 11)
+    pass = pass + check_eq("lst[5000] += 10 is 10011", lst[5000], 10011)
+    pass = pass + check_eq("lst[9999] += 10 is 20009", lst[9999], 20009)
+    return pass
+
+# ── Stress Workload 2: In-Place QuickSort/SelectionSort ─────────────────────────
+def stress_inplace_sorting() -> Int:
+    print_str("--- [2/4] Stressing In-Place List Mutation Sorting ---\n")
+    mut arr := list_new()
+    # Populate with reverse sorted elements
+    mut i := 100
+    while i >= 1:
+        list_push(arr, i)
+        i = i - 1
+
+    # Selection sort using arr[i] = ...
+    n := len(arr)
+    mut p := 0
+    while p < n - 1:
+        mut min_idx := p
+        mut q := p + 1
+        while q < n:
+            if arr[q] < arr[min_idx]:
+                min_idx = q
+            q = q + 1
+        if min_idx != p:
+            temp := arr[p]
+            arr[p] = arr[min_idx]
+            arr[min_idx] = temp
+        p = p + 1
+
+    mut pass := 0
+    pass = pass + check_eq("Sorted arr[0] is 1", arr[0], 1)
+    pass = pass + check_eq("Sorted arr[49] is 50", arr[49], 50)
+    pass = pass + check_eq("Sorted arr[99] is 100", arr[99], 100)
+    return pass
+
+# ── Stress Workload 3: 2D Matrix Grid In-Place Transformation ─────────────────
+def stress_matrix_flattened() -> Int:
+    print_str("--- [3/4] Stressing 100x100 Flattened Matrix In-Place Grid ---\n")
+    cols := 100
+    rows := 100
+    total_cells := rows * cols
+    
+    mut grid := list_new()
+    mut i := 0
+    while i < total_cells:
+        list_push(grid, 0)
+        i = i + 1
+
+    # Populate diagonal and coordinates
+    mut r := 0
+    while r < rows:
+        mut c := 0
+        while c < cols:
+            idx := (r * cols) + c
+            if r == c:
+                grid[idx] = 1 # Identity diagonal
+            else:
+                grid[idx] = (r + 1) * (c + 1)
+            c = c + 1
+        r = r + 1
+
+    mut pass := 0
+    # Check diagonals
+    pass = pass + check_eq("grid[0,0] diagonal is 1", grid[0], 1)
+    pass = pass + check_eq("grid[50,50] diagonal is 1", grid[(50 * cols) + 50], 1)
+    pass = pass + check_eq("grid[99,99] diagonal is 1", grid[(99 * cols) + 99], 1)
+    # Check off-diagonals
+    pass = pass + check_eq("grid[2,3] is 3 * 4 = 12", grid[(2 * cols) + 3], 12)
+    return pass
+
+# ── Stress Workload 4: For-In and For-Range Reductions ─────────────────────────
+def stress_for_in_reductions() -> Int:
+    print_str("--- [4/4] Stressing For-In & Range Aggregations ---\n")
+    mut vals := list_new()
+    for x in range(1, 101):
+        list_push(vals, x)
+
+    mut total_sum := 0
+    for v in vals:
+        total_sum = total_sum + v
+
+    mut pass := 0
+    # Sum of 1..100 = 5050
+    pass = pass + check_eq("Sum of range 1..100 is 5050", total_sum, 5050)
+    return pass
+
+def main() -> Int:
+    print_str("================================================================\n")
+    print_str("       L++ High-Stress Syntax & Index Assignment Suite          \n")
+    print_str("================================================================\n")
+    mut total_pass := 0
+    total_pass = total_pass + stress_large_list_mutations()
+    total_pass = total_pass + stress_inplace_sorting()
+    total_pass = total_pass + stress_matrix_flattened()
+    total_pass = total_pass + stress_for_in_reductions()
+
+    print_str("================================================================\n")
+    print_str("  Total Stress Assertions Passed: ")
+    print(total_pass)
+    print_str(" / 14\n")
+    if total_pass == 14:
+        print_str(" [SUCCESS] All 14/14 High-Stress Syntax Assertions Passed!\n")
+    else:
+        print_str(" [FAILURE] Some stress assertions failed.\n")
+    print_str("================================================================\n")
+    return 0

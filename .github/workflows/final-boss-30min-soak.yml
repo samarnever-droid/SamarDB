@@ -1,0 +1,88 @@
+﻿name: SamarDB 30-Minute Final Boss PQ-1 Production Qualification Soak
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: "Duration per seed in seconds (1800 for 30 min, 300 for 5 min)"
+        required: true
+        default: "1800"
+
+jobs:
+  final-boss-pq:
+    name: "PQ-1 30-Minute Final Boss Matrix (Seed: ${{ matrix.seed }})"
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: [1001, 2002, 3003]
+
+    steps:
+      - name: Checkout SamarDB Repository
+        uses: actions/checkout@v4
+
+      - name: Setup L++ Pure Native AOT Toolchain
+        run: |
+          if (Test-Path bin/lpp.exe) {
+            echo "$((Get-Location).Path)\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          } else {
+            irm https://lplusplus.bond/install.ps1 | iex
+            echo "$HOME\.lpp\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+
+      - name: Verify L++ Compiler
+        run: |
+          lpp --version
+
+      - name: Compile SamarDB Test Suites
+        run: |
+          lpp src/test_cluster_raft.lpp
+          lpp src/test_father_chaos.lpp
+          lpp src/test_5000_quadrant.lpp
+
+      - name: Run 30-Minute Final Boss PQ Soak Test
+        run: |
+          $duration = "${{ github.event.inputs.duration || '1800' }}"
+          python scripts/run_pq.py --seed ${{ matrix.seed }} --duration $duration --out artifacts
+
+      - name: Archive Qualification Artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: samardb-pq-seed-${{ matrix.seed }}-artifacts
+          path: artifacts/
+          if-no-files-found: ignore
+
+      - name: Generate GitHub Step Summary Report
+        if: always()
+        run: |
+          if (Test-Path artifacts/summary.json) {
+            $sum = Get-Content artifacts/summary.json | ConvertFrom-Json
+            $met = Get-Content artifacts/metrics.json | ConvertFrom-Json
+            
+            $report = @"
+          # 🛡️ SamarDB 30-Minute Final Boss Production Qualification (PQ-1)
+          
+          | Metric | Value |
+          | :--- | :--- |
+          | **Status** | **$($sum.result)** |
+          | **Deterministic Seed** | `$($sum.seed)` |
+          | **Test Duration** | $($sum.duration_seconds) s |
+          | **Virtual Concurrent Workers** | $($sum.workers) |
+          | **Transactions Evaluated** | $($sum.transactions) txns |
+          | **Throughput (Sustained)** | $($met.throughput_ops_sec) ops/sec |
+          | **Average Latency** | $($met.average_latency_ns) ns |
+          | **Crash/Recovery Cycles** | $($sum.crash_recovery_cycles) cycles |
+          | **Raft Elections Injected** | $($sum.raft_elections) |
+          | **Network Partitions Tested** | $($sum.network_partitions) |
+          | **B+Tree Cascading Splits** | $($sum.btree_splits) |
+          | **Oracle Mismatches** | $($sum.oracle_mismatches) |
+          | **Lost Committed Txns** | $($sum.lost_commits) |
+          | **Invariant Violations** | $($sum.invariant_failures) |
+          "@
+            $report | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          }

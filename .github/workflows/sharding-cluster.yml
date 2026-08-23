@@ -1,0 +1,38 @@
+﻿name: SamarDB 9-Node 3-Shard Raft Cluster & Partition Torture
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  raft-cluster-sharding:
+    name: "9-Node 3-Shard Distributed Raft Torture"
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout SamarDB Repository
+        uses: actions/checkout@v4
+
+      - name: Setup L++ Pure Native AOT Toolchain
+        run: |
+          if (Test-Path bin/lpp.exe) {
+            echo "$((Get-Location).Path)\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          } else {
+            irm https://lplusplus.bond/install.ps1 | iex
+            echo "$HOME\.lpp\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+
+      - name: Verify L++ Compiler
+        run: |
+          lpp --version
+
+      - name: Compile Distributed Raft Cluster Suite
+        run: |
+          lpp src/test_cluster_raft.lpp
+
+      - name: Run 9-Node 3-Shard Raft Cluster Torture
+        run: |
+          .\src\test_cluster_raft.exe

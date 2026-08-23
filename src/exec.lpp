@@ -1,0 +1,398 @@
+# samardb-exec: Relational Query Execution Engine & System Catalog
+# Implements Volcano operator pipeline (SeqScan, IndexScan, Filter, Project, NestedLoopJoin, DML)
+
+import bytes
+import io
+import pager
+import wal
+import heap
+import tx
+import mvcc
+import vacuum
+import btree
+import schema
+import parser
+
+# ── System Catalog ───────────────────────────────────────────────────────────
+struct Catalog:
+    table_names: List[Str]
+    schemas: List[TableSchema]
+
+def catalog_new() -> Catalog:
+    return Catalog(list_new(), list_new())
+
+def catalog_add_table(cat: Catalog, ts: TableSchema) -> Catalog:
+    mut names := list_new()
+    mut scs := list_new()
+    mut i := 0
+    while i < len(cat.table_names):
+        list_push(names, cat.table_names[i])
+        list_push(scs, cat.schemas[i])
+        i = i + 1
+    list_push(names, ts.table_name)
+    list_push(scs, ts)
+    return Catalog(names, scs)
+
+def catalog_get_table(cat: Catalog, name: Str) -> Tuple[TableSchema, Bool]:
+    mut i := 0
+    while i < len(cat.table_names):
+        if str_eq_ci(cat.table_names[i], name):
+            return (cat.schemas[i], true)
+        i = i + 1
+    empty_s := table_schema_new("", list_new(), list_new(), 0, 0, 0)
+    return (empty_s, false)
+
+def catalog_find_col_idx(ts: TableSchema, col_name: Str) -> Int:
+    mut i := 0
+    while i < len(ts.col_names):
+        if str_eq_ci(ts.col_names[i], col_name):
+            return i
+        i = i + 1
+    return -1
+
+# ── DML Operator: INSERT ─────────────────────────────────────────────────────
+# Encodes record, inserts into slotted heap with MVCC header, and updates B+ Tree index
+def execute_insert(
+    cat: Catalog,
+    pool: BufferPool,
+    tx_mgr: TxManager,
+    wal_mgr: WalManager,
+    table_name: Str,
+    values: List[Int],
+    txn_id: Int
+) -> Tuple[BufferPool, TxManager, WalManager, Bool]:
+    (ts, found) := catalog_get_table(cat, table_name)
+    if !found:
+        return (pool, tx_mgr, wal_mgr, false)
+        
+    rec_payload := record_encode_integers(values)
+    
+    # 1. Fetch table heap page from buffer pool
+    (p1, heap_buf, fetch_ok) := buffer_pool_fetch_page(pool, ts.heap_page_id)
+    if !fetch_ok:
+        return (p1, tx_mgr, wal_mgr, false)
+        
+    # 2. Insert MVCC tuple into heap page
+    (updated_heap, slot_id, ins_ok) := heap_mvcc_insert(heap_buf, rec_payload, txn_id, 0)
+    if !ins_ok:
+        p1_unpinned := buffer_pool_unpin_page(p1, ts.heap_page_id, false)
+        return (p1_unpinned, tx_mgr, wal_mgr, false)
+        
+    # Unpin heap page and mark dirty
+    p2 := buffer_pool_unpin_page(p1, ts.heap_page_id, true)
+    
+    # 3. Log WAL record for insert (Record Type 4 = HEAP_INSERT)
+    (wal_after_log, lsn) := wal_append_record(wal_mgr, txn_id, 0, 4, rec_payload)
+    
+    # 4. If table has an index on PK, update B+ Tree index page
+    if ts.index_page_id != 0 && ts.pk_col_idx >= 0 && ts.pk_col_idx < len(values):
+        pk_val := values[ts.pk_col_idx]
+        (p3, index_buf, ifetch_ok) := buffer_pool_fetch_page(p2, ts.index_page_id)
+        if ifetch_ok:
+            (updated_idx, idx_ok) := btree_leaf_insert(index_buf, pk_val, ts.heap_page_id, slot_id)
+            p4 := buffer_pool_unpin_page(p3, ts.index_page_id, true)
+            return (p4, tx_mgr, wal_after_log, true)
+        return (p3, tx_mgr, wal_after_log, true)
+        
+    return (p2, tx_mgr, wal_after_log, true)
+
+# ── Query Operator: SeqScan ──────────────────────────────────────────────────
+# Scans heap pages, returning all tuples visible to the given MVCC Snapshot
+def execute_seq_scan(
+    cat: Catalog,
+    pool: BufferPool,
+    tx_mgr: TxManager,
+    snap: Snapshot,
+    table_name: Str,
+    txn_id: Int
+) -> Tuple[BufferPool, List[Bytes]]:
+    mut results := list_new()
+    (ts, found) := catalog_get_table(cat, table_name)
+    if !found:
+        return (pool, results)
+        
+    (p1, heap_buf, fetch_ok) := buffer_pool_fetch_page(pool, ts.heap_page_id)
+    if !fetch_ok:
+        return (p1, results)
+        
+    # Get visible slots via MVCC scan
+    visible_slots := heap_mvcc_scan(heap_buf, snap, txn_id, tx_mgr)
+    
+    mut i := 0
+    while i < len(visible_slots):
+        slot := visible_slots[i]
+        payload := heap_mvcc_get(heap_buf, slot)
+        list_push(results, payload)
+        i = i + 1
+        
+    p2 := buffer_pool_unpin_page(p1, ts.heap_page_id, false)
+    return (p2, results)
+
+# ── Query Operator: IndexScan ────────────────────────────────────────────────
+# Uses B+ Tree index to directly retrieve matching tuple by key with O(log N) lookup
+def execute_index_scan(
+    cat: Catalog,
+    pool: BufferPool,
+    tx_mgr: TxManager,
+    snap: Snapshot,
+    table_name: Str,
+    key: Int,
+    txn_id: Int
+) -> Tuple[BufferPool, List[Bytes]]:
+    mut results := list_new()
+    (ts, found) := catalog_get_table(cat, table_name)
+    if !found || ts.index_page_id == 0:
+        return (pool, results)
+        
+    # 1. Fetch index root page
+    (p1, index_buf, ifetch_ok) := buffer_pool_fetch_page(pool, ts.index_page_id)
+    if !ifetch_ok:
+        return (p1, results)
+        
+    tree := BTreeIndex(ts.index_page_id, 1, ts.index_page_id + 1, 8192)
+    (target_page_id, target_slot_id, btree_found) := btree_search(tree, index_buf, key)
+    p2 := buffer_pool_unpin_page(p1, ts.index_page_id, false)
+    
+    if !btree_found:
+        return (p2, results)
+        
+    # 2. Directly fetch target heap page
+    (p3, heap_buf, hfetch_ok) := buffer_pool_fetch_page(p2, target_page_id)
+    if !hfetch_ok:
+        return (p3, results)
+        
+    ptr := item_pointer_decode(heap_buf, target_slot_id)
+    if ptr.offset > 0 && ptr.length >= 24:
+        thdr := tuple_header_decode(heap_buf, ptr.offset)
+        if mvcc_is_tuple_visible(thdr, snap, txn_id, tx_mgr):
+            payload := heap_mvcc_get(heap_buf, target_slot_id)
+            list_push(results, payload)
+            
+    p4 := buffer_pool_unpin_page(p3, target_page_id, false)
+    return (p4, results)
+
+# ── Query Operator: Filter ───────────────────────────────────────────────────
+# Evaluates binary predicate on column (e.g. age >= 30)
+def execute_filter(
+    records: List[Bytes],
+    col_idx: Int,
+    op: Int,
+    target_val: Int
+) -> List[Bytes]:
+    mut out := list_new()
+    mut i := 0
+    while i < len(records):
+        rec := records[i]
+        val := record_get_int(rec, col_idx)
+        mut matched := false
+        
+        if op == OP_EQ():
+            matched = (val == target_val)
+        elif op == OP_NEQ():
+            matched = (val != target_val)
+        elif op == OP_LT():
+            matched = (val < target_val)
+        elif op == OP_LTE():
+            matched = (val <= target_val)
+        elif op == OP_GT():
+            matched = (val > target_val)
+        elif op == OP_GTE():
+            matched = (val >= target_val)
+            
+        if matched:
+            list_push(out, rec)
+        i = i + 1
+    return out
+
+# ── Query Operator: Project ──────────────────────────────────────────────────
+# Extracts projected column values into tabular integer matrix
+def execute_project(
+    records: List[Bytes],
+    col_indices: List[Int]
+) -> List[List[Int]]:
+    mut rows := list_new()
+    mut i := 0
+    while i < len(records):
+        rec := records[i]
+        mut row := list_new()
+        mut c := 0
+        while c < len(col_indices):
+            col_idx := col_indices[c]
+            val := record_get_int(rec, col_idx)
+            list_push(row, val)
+            c = c + 1
+        list_push(rows, row)
+        i = i + 1
+    return rows
+
+# ── Query Operator: NestedLoopJoin ───────────────────────────────────────────
+# Performs inner join between two relations matching left_col == right_col
+def execute_nested_loop_join(
+    left_records: List[Bytes],
+    right_records: List[Bytes],
+    left_col_idx: Int,
+    right_col_idx: Int
+) -> List[Bytes]:
+    mut joined_records := list_new()
+    mut l := 0
+    while l < len(left_records):
+        left_rec := left_records[l]
+        left_val := record_get_int(left_rec, left_col_idx)
+        
+        mut r := 0
+        while r < len(right_records):
+            right_rec := right_records[r]
+            right_val := record_get_int(right_rec, right_col_idx)
+            
+            if left_val == right_val:
+                # Merge columns from left and right into single joined record
+                n_left := record_get_col_count(left_rec)
+                n_right := record_get_col_count(right_rec)
+                mut merged_vals := list_new()
+                
+                mut ci := 0
+                while ci < n_left:
+                    list_push(merged_vals, record_get_int(left_rec, ci))
+                    ci = ci + 1
+                    
+                mut cj := 0
+                while cj < n_right:
+                    list_push(merged_vals, record_get_int(right_rec, cj))
+                    cj = cj + 1
+                    
+                merged_rec := record_encode_integers(merged_vals)
+                list_push(joined_records, merged_rec)
+            r = r + 1
+        l = l + 1
+    return joined_records
+
+# ── Query Operator: HashJoin (Postgres Hash Join Strategy) ────────────────────
+# Builds an in-memory hash table over the right relation in O(R), then probes in O(L)
+def execute_hash_join(
+    left_records: List[Bytes],
+    right_records: List[Bytes],
+    left_col_idx: Int,
+    right_col_idx: Int
+) -> List[Bytes]:
+    # 1. Build Phase: bucket table index for right records
+    mut r_keys := list_new()
+    mut r_idxs := list_new()
+    mut r := 0
+    n_right := len(right_records)
+    while r < n_right:
+        r_val := record_get_int(right_records[r], right_col_idx)
+        list_push(r_keys, r_val)
+        list_push(r_idxs, r)
+        r = r + 1
+
+    # 2. Probe Phase: match left records against indexed right records
+    mut joined_records := list_new()
+    mut l := 0
+    n_left := len(left_records)
+    while l < n_left:
+        left_rec := left_records[l]
+        left_val := record_get_int(left_rec, left_col_idx)
+
+        mut k := 0
+        while k < n_right:
+            if r_keys[k] == left_val:
+                matched_r_idx := r_idxs[k]
+                right_rec := right_records[matched_r_idx]
+
+                nl := record_get_col_count(left_rec)
+                nr := record_get_col_count(right_rec)
+                mut merged_vals := list_new()
+                mut ci := 0
+                while ci < nl:
+                    list_push(merged_vals, record_get_int(left_rec, ci))
+                    ci = ci + 1
+                mut cj := 0
+                while cj < nr:
+                    list_push(merged_vals, record_get_int(right_rec, cj))
+                    cj = cj + 1
+                list_push(joined_records, record_encode_integers(merged_vals))
+            k = k + 1
+        l = l + 1
+    return joined_records
+
+# ── DML Operator: UPDATE ─────────────────────────────────────────────────────
+def execute_update(
+    cat: Catalog,
+    pool: BufferPool,
+    tx_mgr: TxManager,
+    wal_mgr: WalManager,
+    table_name: Str,
+    set_col_idx: Int,
+    new_val: Int,
+    where_col_idx: Int,
+    where_val: Int,
+    txn_id: Int
+) -> Tuple[BufferPool, TxManager, WalManager, Int]:
+    (ts, found) := catalog_get_table(cat, table_name)
+    if !found:
+        return (pool, tx_mgr, wal_mgr, 0)
+        
+    (p1, heap_buf, fetch_ok) := buffer_pool_fetch_page(pool, ts.heap_page_id)
+    if !fetch_ok:
+        return (p1, tx_mgr, wal_mgr, 0)
+        
+    hdr := page_header_decode(heap_buf)
+    snap := tx_get_snapshot(tx_mgr)
+    mut updated_count := 0
+    
+    mut s := 0
+    while s < hdr.slot_count:
+        ptr := item_pointer_decode(heap_buf, s)
+        if ptr.offset > 0 && ptr.length >= 24:
+            thdr := tuple_header_decode(heap_buf, ptr.offset)
+            if mvcc_is_tuple_visible(thdr, snap, txn_id, tx_mgr):
+                payload := heap_mvcc_get(heap_buf, s)
+                if record_get_int(payload, where_col_idx) == where_val:
+                    # Update column in record
+                    record_set_int(payload, set_col_idx, new_val)
+                    (p_after_up, new_slot, up_ok) := heap_mvcc_update(heap_buf, s, payload, txn_id, 0)
+                    if up_ok:
+                        updated_count = updated_count + 1
+        s = s + 1
+        
+    p2 := buffer_pool_unpin_page(p1, ts.heap_page_id, updated_count > 0)
+    return (p2, tx_mgr, wal_mgr, updated_count)
+
+# ── DML Operator: DELETE ─────────────────────────────────────────────────────
+def execute_delete(
+    cat: Catalog,
+    pool: BufferPool,
+    tx_mgr: TxManager,
+    wal_mgr: WalManager,
+    table_name: Str,
+    where_col_idx: Int,
+    where_val: Int,
+    txn_id: Int
+) -> Tuple[BufferPool, TxManager, WalManager, Int]:
+    (ts, found) := catalog_get_table(cat, table_name)
+    if !found:
+        return (pool, tx_mgr, wal_mgr, 0)
+        
+    (p1, heap_buf, fetch_ok) := buffer_pool_fetch_page(pool, ts.heap_page_id)
+    if !fetch_ok:
+        return (p1, tx_mgr, wal_mgr, 0)
+        
+    hdr := page_header_decode(heap_buf)
+    snap := tx_get_snapshot(tx_mgr)
+    mut deleted_count := 0
+    
+    mut s := 0
+    while s < hdr.slot_count:
+        ptr := item_pointer_decode(heap_buf, s)
+        if ptr.offset > 0 && ptr.length >= 24:
+            thdr := tuple_header_decode(heap_buf, ptr.offset)
+            if mvcc_is_tuple_visible(thdr, snap, txn_id, tx_mgr):
+                payload := heap_mvcc_get(heap_buf, s)
+                if record_get_int(payload, where_col_idx) == where_val:
+                    (p_after_del, del_ok) := heap_mvcc_delete(heap_buf, s, txn_id, 0)
+                    if del_ok:
+                        deleted_count = deleted_count + 1
+        s = s + 1
+        
+    p2 := buffer_pool_unpin_page(p1, ts.heap_page_id, deleted_count > 0)
+    return (p2, tx_mgr, wal_mgr, deleted_count)

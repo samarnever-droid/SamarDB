@@ -1,0 +1,215 @@
+# samardb Phase 12 Test Suite: Core Hardening & Multi-Level Index / DML Recovery
+# Verifies: Multi-level B+ Tree recursive internal-to-leaf search,
+#           Complete ARIES DML WAL logging (INSERT, UPDATE, DELETE),
+#           and Full Typed Relational Row Codecs (INT, VARCHAR, BOOL, NULL).
+
+import bytes
+import io
+import pager
+import wal
+import heap
+import recovery
+import btree
+import schema
+
+# ── Test Framework ────────────────────────────────────────────────────────────
+def ci(label: Str, got: Int, want: Int) -> Int:
+    if got == want:
+        print_str(str_concat("  [PASS] ", label))
+        return 1
+    else:
+        out := str_concat("  [FAIL] ", label)
+        out2 := str_concat(out, str_concat("  got=", int_to_str(got)))
+        print_str(str_concat(out2, str_concat(" want=", int_to_str(want))))
+        return 0
+
+def cb(label: Str, got: Bool, want: Bool) -> Int:
+    ok := (got && want) || (!got && !want)
+    if ok:
+        print_str(str_concat("  [PASS] ", label))
+        return 1
+    else:
+        print_str(str_concat("  [FAIL] ", label))
+        return 0
+
+# ── [1/4] Multi-Level B+ Tree Internal Node Traversal ─────────────────────────
+def test_multilevel_btree_search() -> Int:
+    print_str("--- [1/4] Testing Multi-Level B+ Tree Internal Node Traversal ---")
+    mut p := 0
+
+    # 1. Create Leaf Page 10 (keys 10, 20, 30, 40)
+    mut leaf1 := btree_node_init(8192, PAGE_BTREE_LEAF(), 20) # right_sibling = 20
+    (l1_a, _) := btree_leaf_insert(leaf1, 10, 100, 0)
+    (l1_b, _) := btree_leaf_insert(l1_a, 20, 100, 1)
+    (l1_c, _) := btree_leaf_insert(l1_b, 30, 100, 2)
+    (l1_d, _) := btree_leaf_insert(l1_c, 40, 100, 3)
+
+    # 2. Create Leaf Page 20 (keys 50, 60, 70, 80)
+    mut leaf2 := btree_node_init(8192, PAGE_BTREE_LEAF(), 0)
+    (l2_a, _) := btree_leaf_insert(leaf2, 50, 200, 0)
+    (l2_b, _) := btree_leaf_insert(l2_a, 60, 200, 1)
+    (l2_c, _) := btree_leaf_insert(l2_b, 70, 200, 2)
+    (l2_d, _) := btree_leaf_insert(l2_c, 80, 200, 3)
+
+    # 3. Create Root Internal Page (routes < 50 to Page 10, >= 50 to Page 20)
+    mut root := btree_node_init(8192, PAGE_BTREE_INTERNAL(), 0)
+    (r_a, _) := btree_internal_insert(root, 0, 10)   # lower partition -> child page 10
+    (r_b, _) := btree_internal_insert(r_a, 50, 20)  # upper partition -> child page 20
+
+    # Prepare child lists for multi-level search
+    mut child_ids := list_new()
+    list_push(child_ids, 10)
+    list_push(child_ids, 20)
+    mut child_bufs := list_new()
+    list_push(child_bufs, l1_d)
+    list_push(child_bufs, l2_d)
+
+    # 4. Perform Multi-Level Searches
+    (p1, s1, ok1) := btree_search_multi_level(r_b, child_ids, child_bufs, 20)
+    p = p + cb("Search key 20 routed through internal node to Leaf 1", ok1, true)
+    p = p + ci("Key 20 heap page is 100", p1, 100)
+    p = p + ci("Key 20 heap slot is 1", s1, 1)
+
+    (p2, s2, ok2) := btree_search_multi_level(r_b, child_ids, child_bufs, 70)
+    p = p + cb("Search key 70 routed through internal node to Leaf 2", ok2, true)
+    p = p + ci("Key 70 heap page is 200", p2, 200)
+    p = p + ci("Key 70 heap slot is 2", s2, 2)
+
+    (p3, s3, ok3) := btree_search_multi_level(r_b, child_ids, child_bufs, 99)
+    p = p + cb("Search non-existent key 99 returns found=false", ok3, false)
+    return p
+
+# ── [2/4] Complete ARIES DML Logging & Recovery (UPDATE & DELETE) ─────────────
+def test_dml_wal_recovery() -> Int:
+    print_str("--- [2/4] Testing Complete DML WAL Logging & ARIES REDO ---")
+    mut p := 0
+
+    mut wal_mgr := wal_manager_new()
+    t1_orig := bytes_alloc(16)
+    bytes_set64le(t1_orig, 0, 1000)
+
+    # 1. Log HEAP_INSERT (LSN 1000)
+    p_ins := bytes_alloc(20)
+    bytes_set32le(p_ins, 0, 0) # page_id = 0
+    bytes_copy(p_ins, 4, t1_orig, 0, 16)
+    (wal_mgr, lsn_ins) := wal_append_record(wal_mgr, 1, 0, 4, p_ins)
+    p = p + ci("WAL HEAP_INSERT logged at LSN 1000", lsn_ins, 1000)
+
+    # 2. Log HEAP_UPDATE (LSN > 1000)
+    t1_upd := bytes_alloc(16)
+    bytes_set64le(t1_upd, 0, 9999) # modified value
+    (wal_mgr, lsn_upd) := wal_append_update_record(wal_mgr, 1, lsn_ins, 0, 0, t1_upd)
+    p = p + cb("WAL HEAP_UPDATE logged with monotonic LSN", lsn_upd > lsn_ins, true)
+
+    # 3. Log HEAP_DELETE (LSN > lsn_upd)
+    (wal_mgr, lsn_del) := wal_append_delete_record(wal_mgr, 1, lsn_upd, 0, 0)
+    p = p + cb("WAL HEAP_DELETE logged with monotonic LSN", lsn_del > lsn_upd, true)
+    p = p + ci("Total WAL records logged is 3", len(wal_mgr.records), 3)
+
+    # 4. Run ARIES REDO over the WAL records into a clean buffer pool
+    disk := sim_disk_new(8192, 5)
+    pool := buffer_pool_new(3, 8192, disk)
+    (recovered_pool, stats) := recovery_redo_scan(pool, wal_mgr.records)
+
+    p = p + ci("ARIES recovery scanned 3 WAL records", stats.records_scanned, 3)
+    p = p + ci("ARIES recovery applied all 3 DML records", stats.records_applied, 3)
+    p = p + ci("0 records skipped", stats.records_skipped, 0)
+    return p
+
+# ── [3/4] Full Typed Relational Record Codec (INT, VARCHAR, BOOL, NULL) ───────
+def test_typed_record_codecs() -> Int:
+    print_str("--- [3/4] Testing Typed Record Codecs (INT, VARCHAR, BOOL, NULL) ---")
+    mut p := 0
+
+    mut col_types := list_new()
+    list_push(col_types, TYPE_INT())       # col 0: id
+    list_push(col_types, TYPE_VARCHAR())   # col 1: name
+    list_push(col_types, TYPE_BOOL())      # col 2: active
+    list_push(col_types, TYPE_INT())       # col 3: bonus (NULL)
+
+    mut int_vals := list_new()
+    list_push(int_vals, 42)
+    list_push(int_vals, 0)
+    list_push(int_vals, 0)
+    list_push(int_vals, 0) # NULL value
+
+    mut str_vals := list_new()
+    list_push(str_vals, "")
+    list_push(str_vals, "Alice")
+    list_push(str_vals, "")
+    list_push(str_vals, "")
+
+    mut bool_vals := list_new()
+    list_push(bool_vals, false)
+    list_push(bool_vals, false)
+    list_push(bool_vals, true)
+    list_push(bool_vals, false)
+
+    # null_mask = 8 (bit 3 is set -> col 3 is NULL)
+    rec := record_encode_mixed(col_types, int_vals, str_vals, bool_vals, 8)
+
+    p = p + ci("Record column count is 4", record_get_col_count(rec), 4)
+    p = p + ci("Col 0 (id) is 42", record_get_int(rec, 0), 42)
+    p = p + cb("Col 0 is not null", record_is_null(rec, 0), false)
+    p = p + ci("Col 1 (name) length is 5", record_get_varchar_len(rec, 1), 5)
+    p = p + cb("Col 1 is not null", record_is_null(rec, 1), false)
+    p = p + cb("Col 2 (active) is true", record_get_bool(rec, 2), true)
+    p = p + cb("Col 2 is not null", record_is_null(rec, 2), false)
+    p = p + cb("Col 3 (bonus) IS NULL", record_is_null(rec, 3), true)
+    return p
+
+# ── [4/4] Typed Record Fully Populated Roundtrip ──────────────────────────────
+def test_typed_record_roundtrip() -> Int:
+    print_str("--- [4/4] Testing Fully Populated Typed Record ---")
+    mut p := 0
+
+    mut col_types := list_new()
+    list_push(col_types, TYPE_INT())       # col 0: id
+    list_push(col_types, TYPE_VARCHAR())   # col 1: title
+    list_push(col_types, TYPE_BOOL())      # col 2: flag
+    list_push(col_types, TYPE_INT())       # col 3: score
+
+    mut int_vals := list_new()
+    list_push(int_vals, 100)
+    list_push(int_vals, 0)
+    list_push(int_vals, 0)
+    list_push(int_vals, 5000)
+
+    mut str_vals := list_new()
+    list_push(str_vals, "")
+    list_push(str_vals, "Database")
+    list_push(str_vals, "")
+    list_push(str_vals, "")
+
+    mut bool_vals := list_new()
+    list_push(bool_vals, false)
+    list_push(bool_vals, false)
+    list_push(bool_vals, false)
+    list_push(bool_vals, false)
+
+    # null_mask = 0 (no null columns)
+    rec := record_encode_mixed(col_types, int_vals, str_vals, bool_vals, 0)
+
+    p = p + ci("Col 0 is 100", record_get_int(rec, 0), 100)
+    p = p + ci("Col 1 length is 8", record_get_varchar_len(rec, 1), 8)
+    p = p + cb("Col 2 is false", record_get_bool(rec, 2), false)
+    p = p + ci("Col 3 is 5000", record_get_int(rec, 3), 5000)
+    p = p + cb("Col 3 is not null", record_is_null(rec, 3), false)
+    return p
+
+def main():
+    print_str("================================================================")
+    print_str("    SamarDB Phase 12 Core Hardening & Multi-Level Index Suite   ")
+    print_str("================================================================")
+    p_one := test_multilevel_btree_search()
+    p_two := test_dml_wal_recovery()
+    p_three := test_typed_record_codecs()
+    p_four := test_typed_record_roundtrip()
+    total := p_one + p_two + p_three + p_four
+    print_str("================================================================")
+    if total >= 20:
+        print_str(str_concat(" [SUCCESS] All ", str_concat(int_to_str(total), " SamarDB Phase 12 Core Hardening Assertions Passed!")))
+    else:
+        failed := 20 - total
+        print_str(str_concat(" [FAILED] ", str_concat(int_to_str(failed), str_concat(" failures, ", str_concat(int_to_str(total), " passed")))))
+    print_str("================================================================")

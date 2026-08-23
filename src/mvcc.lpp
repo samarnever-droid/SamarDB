@@ -1,0 +1,92 @@
+# samardb-mvcc: Multi-Version Concurrency Control & Snapshot Visibility Engine
+# Implements PostgreSQL MVCC visibility algorithm per docs/format/tuple.md and ADR 0003
+
+import bytes
+import tx
+
+struct TupleHeader:
+    xmin: Int
+    xmax: Int
+    cid: Int
+    infomask: Int
+    payload_len: Int
+
+# Encode a 24-byte MVCC Tuple Header
+def tuple_header_encode(b: Bytes, off: Int, hdr: TupleHeader):
+    bytes_set64le(b, off + 0, hdr.xmin)
+    bytes_set64le(b, off + 8, hdr.xmax)
+    bytes_set32le(b, off + 16, hdr.cid)
+    bytes_set16le(b, off + 20, hdr.infomask)
+    bytes_set16le(b, off + 22, hdr.payload_len)
+
+# Decode a 24-byte MVCC Tuple Header
+def tuple_header_decode(b: Bytes, off: Int) -> TupleHeader:
+    xmin := bytes_get64le(b, off + 0)
+    xmax := bytes_get64le(b, off + 8)
+    cid := bytes_get32le(b, off + 16)
+    infomask := bytes_get16le(b, off + 20)
+    payload_len := bytes_get16le(b, off + 22)
+    return TupleHeader(xmin, xmax, cid, infomask, payload_len)
+
+# Construct a full MVCC tuple (24-byte header + user column payload)
+def tuple_create_mvcc(user_payload: Bytes, xmin: Int, cid: Int) -> Bytes:
+    plen := bytes_len(user_payload)
+    out := bytes_alloc(24 + plen)
+    hdr := TupleHeader(xmin, 0, cid, 0, plen)
+    tuple_header_encode(out, 0, hdr)
+    if plen > 0:
+        bytes_copy(out, 24, user_payload, 0, plen)
+    return out
+
+# Extract the user payload from an MVCC tuple
+def tuple_extract_payload(raw_tuple: Bytes) -> Bytes:
+    tlen := bytes_len(raw_tuple)
+    if tlen <= 24:
+        return bytes_alloc(0)
+    hdr := tuple_header_decode(raw_tuple, 0)
+    return bytes_slice(raw_tuple, 24, hdr.payload_len)
+
+# Core MVCC Visibility Check
+# Evaluates whether a tuple is visible to a reading transaction with a given Snapshot
+def mvcc_is_tuple_visible(
+    hdr: TupleHeader,
+    snapshot: Snapshot,
+    current_txn_id: Int,
+    tx_mgr: TxManager
+) -> Bool:
+    # ── Step 1: Evaluate Tuple Creation (xmin) ──────────────────────────────
+    if hdr.xmin == current_txn_id:
+        # Created in current transaction: visible unless deleted in same transaction
+        if hdr.xmax == current_txn_id:
+            return false
+        return true
+        
+    # If created by an active or future transaction, it is invisible
+    if snapshot_is_active(snapshot, hdr.xmin) || hdr.xmin >= snapshot.xmax:
+        return false
+        
+    # Check CLOG status of xmin
+    xmin_status := tx_get_status(tx_mgr, hdr.xmin)
+    if xmin_status != TXN_COMMITTED():
+        return false
+        
+    # ── Step 2: Evaluate Tuple Deletion (xmax) ──────────────────────────────
+    if hdr.xmax == 0:
+        return true
+        
+    if hdr.xmax == current_txn_id:
+        # Deleted by current transaction
+        return false
+        
+    # If deleter was active at snapshot time or started after snapshot, delete is not visible yet
+    if snapshot_is_active(snapshot, hdr.xmax) || hdr.xmax >= snapshot.xmax:
+        return true
+        
+    # Check CLOG status of xmax
+    xmax_status := tx_get_status(tx_mgr, hdr.xmax)
+    if xmax_status == TXN_COMMITTED():
+        # Deleted by an already-committed transaction -> invisible
+        return false
+        
+    # If delete was aborted or still in progress outside snapshot -> visible
+    return true

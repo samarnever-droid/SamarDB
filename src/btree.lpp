@@ -1,0 +1,401 @@
+# samardb-btree: B+ Tree Indexing Engine (v1)
+# Implements Lehman-Yao B-link tree on-disk format, binary search, splits, and range scans
+
+import bytes
+import io
+import pager
+
+def PAGE_BTREE_LEAF() -> Int:
+    return 2
+
+def PAGE_BTREE_INTERNAL() -> Int:
+    return 3
+
+# ── Node Header Accessors ────────────────────────────────────────────────────
+# Bytes 0..32: standard SamarDB PageHeader
+# special_offset: bytes 24..28 stores right_sibling (u32), 28..32 stores left_sibling (u32)
+
+def btree_node_init(page_size: Int, page_type: Int, right_sibling: Int) -> Bytes:
+    b := bytes_alloc(page_size)
+    hdr := PageHeader(0, 0, page_type, 0, 1, 0, 32, page_size, right_sibling)
+    page_header_encode(b, hdr)
+    return b
+
+def btree_get_right_sibling(page: Bytes) -> Int:
+    hdr := page_header_decode(page)
+    return hdr.special_offset
+
+def btree_set_right_sibling(page: Bytes, right_page_id: Int):
+    hdr := page_header_decode(page)
+    new_hdr := PageHeader(
+        0,
+        hdr.lsn,
+        hdr.page_type,
+        hdr.flags,
+        hdr.format_version,
+        hdr.slot_count,
+        hdr.lower,
+        hdr.upper,
+        right_page_id
+    )
+    page_header_encode(page, new_hdr)
+
+# ── Leaf Node Cell Codecs (16 bytes per cell) ────────────────────────────────
+# 0..8   : key (i64)
+# 8..12  : heap_page_id (u32)
+# 12..14 : heap_slot_id (u16)
+# 14..16 : reserved (u16)
+
+def btree_leaf_cell_encode(b: Bytes, pos: Int, key: Int, heap_page_id: Int, heap_slot_id: Int):
+    bytes_set64le(b, pos, key)
+    bytes_set32le(b, pos + 8, heap_page_id)
+    bytes_set16le(b, pos + 12, heap_slot_id)
+    bytes_set16le(b, pos + 14, 0)
+
+def btree_leaf_cell_get_key(b: Bytes, cell_offset: Int) -> Int:
+    return bytes_get64le(b, cell_offset)
+
+def btree_leaf_cell_get_page_id(b: Bytes, cell_offset: Int) -> Int:
+    return bytes_get32le(b, cell_offset + 8)
+
+def btree_leaf_cell_get_slot_id(b: Bytes, cell_offset: Int) -> Int:
+    return bytes_get16le(b, cell_offset + 12)
+
+# ── Internal Node Cell Codecs (16 bytes per cell) ────────────────────────────
+# 0..8   : key (i64) - minimum key for child subtree
+# 8..12  : child_page_id (u32)
+# 12..16 : reserved (u32)
+
+def btree_internal_cell_encode(b: Bytes, pos: Int, key: Int, child_page_id: Int):
+    bytes_set64le(b, pos, key)
+    bytes_set32le(b, pos + 8, child_page_id)
+    bytes_set32le(b, pos + 12, 0)
+
+def btree_internal_cell_get_key(b: Bytes, cell_offset: Int) -> Int:
+    return bytes_get64le(b, cell_offset)
+
+def btree_internal_cell_get_child(b: Bytes, cell_offset: Int) -> Int:
+    return bytes_get32le(b, cell_offset + 8)
+
+# ── Cell Pointer Array Codecs ────────────────────────────────────────────────
+# 2 bytes per pointer in slot array at [32 .. lower)
+
+def btree_get_cell_offset(page: Bytes, index: Int) -> Int:
+    pos := 32 + (index * 2)
+    return bytes_get16le(page, pos)
+
+def btree_set_cell_offset(page: Bytes, index: Int, cell_offset: Int):
+    pos := 32 + (index * 2)
+    bytes_set16le(page, pos, cell_offset)
+
+# ── Fast Binary Search within Node (Zero-Allocation Fast-Path) ───────────────
+# Returns (index, exact_match)
+def btree_leaf_find_cell(page: Bytes, key: Int) -> Tuple[Int, Bool]:
+    slot_count := bytes_get16le(page, 20) # byte 20 = slot_count
+    mut low := 0
+    mut high := slot_count - 1
+    
+    while low <= high:
+        mid := (low + high) / 2
+        off := btree_get_cell_offset(page, mid)
+        mid_key := btree_leaf_cell_get_key(page, off)
+        
+        if mid_key == key:
+            return (mid, true)
+        if mid_key < key:
+            low = mid + 1
+        else:
+            high = mid - 1
+    return (low, false)
+
+# Find child page in internal node for a given search key (Zero-Allocation Fast-Path)
+def btree_internal_find_child(page: Bytes, key: Int) -> Int:
+    slot_count := bytes_get16le(page, 20)
+    if slot_count == 0:
+        return 0
+    
+    mut low := 0
+    mut high := slot_count - 1
+    mut target_idx := 0
+    
+    while low <= high:
+        mid := (low + high) / 2
+        off := btree_get_cell_offset(page, mid)
+        mid_key := btree_internal_cell_get_key(page, off)
+        
+        if key >= mid_key:
+            target_idx = mid
+            low = mid + 1
+        else:
+            high = mid - 1
+            
+    chosen_off := btree_get_cell_offset(page, target_idx)
+    return btree_internal_cell_get_child(page, chosen_off)
+
+# ── Leaf Insertion & Split ───────────────────────────────────────────────────
+def btree_leaf_insert(
+    page: Bytes,
+    key: Int,
+    heap_page_id: Int,
+    heap_slot_id: Int
+) -> Tuple[Bytes, Bool]:
+    hdr := page_header_decode(page)
+    page_size := bytes_len(page)
+    
+    # Check free space: needs 2 bytes for pointer + 16 bytes for cell = 18 bytes
+    free_space := hdr.upper - hdr.lower
+    if free_space < 18:
+        return (page, false) # Node full, split required
+        
+    (insert_idx, exists) := btree_leaf_find_cell(page, key)
+    
+    # Allocate cell at upper
+    new_upper := hdr.upper - 16
+    btree_leaf_cell_encode(page, new_upper, key, heap_page_id, heap_slot_id)
+    
+    # Shift cell pointer array to make room at insert_idx
+    mut i := hdr.slot_count
+    while i > insert_idx:
+        prev_off := btree_get_cell_offset(page, i - 1)
+        btree_set_cell_offset(page, i, prev_off)
+        i = i - 1
+    btree_set_cell_offset(page, insert_idx, new_upper)
+    
+    new_lower := hdr.lower + 2
+    new_hdr := PageHeader(
+        0,
+        hdr.lsn,
+        hdr.page_type,
+        hdr.flags,
+        hdr.format_version,
+        hdr.slot_count + 1,
+        new_lower,
+        new_upper,
+        hdr.special_offset
+    )
+    page_header_encode(page, new_hdr)
+    return (page, true)
+
+# Split leaf node 50/50: returns (left_page, right_page, split_key)
+def btree_leaf_split(
+    page: Bytes,
+    right_page_id: Int
+) -> Tuple[Bytes, Bytes, Int]:
+    hdr := page_header_decode(page)
+    page_size := bytes_len(page)
+    
+    right_page := btree_node_init(page_size, PAGE_BTREE_LEAF(), hdr.special_offset)
+    left_page := btree_node_init(page_size, PAGE_BTREE_LEAF(), right_page_id)
+    
+    total_cells := hdr.slot_count
+    split_idx := total_cells / 2
+    
+    # Split key is the smallest key of the right child
+    split_off := btree_get_cell_offset(page, split_idx)
+    split_key := btree_leaf_cell_get_key(page, split_off)
+    
+    # 1. Populate left page [0 .. split_idx)
+    mut l_upper := page_size
+    mut l_lower := 32
+    mut i := 0
+    while i < split_idx:
+        old_off := btree_get_cell_offset(page, i)
+        k := btree_leaf_cell_get_key(page, old_off)
+        p := btree_leaf_cell_get_page_id(page, old_off)
+        s := btree_leaf_cell_get_slot_id(page, old_off)
+        
+        l_upper = l_upper - 16
+        btree_leaf_cell_encode(left_page, l_upper, k, p, s)
+        btree_set_cell_offset(left_page, i, l_upper)
+        l_lower = l_lower + 2
+        i = i + 1
+        
+    left_hdr := PageHeader(0, hdr.lsn, PAGE_BTREE_LEAF(), hdr.flags, 1, split_idx, l_lower, l_upper, right_page_id)
+    page_header_encode(left_page, left_hdr)
+    
+    # 2. Populate right page [split_idx .. total_cells)
+    mut r_upper := page_size
+    mut r_lower := 32
+    mut j := split_idx
+    mut r_idx := 0
+    while j < total_cells:
+        old_off := btree_get_cell_offset(page, j)
+        k := btree_leaf_cell_get_key(page, old_off)
+        p := btree_leaf_cell_get_page_id(page, old_off)
+        s := btree_leaf_cell_get_slot_id(page, old_off)
+        
+        r_upper = r_upper - 16
+        btree_leaf_cell_encode(right_page, r_upper, k, p, s)
+        btree_set_cell_offset(right_page, r_idx, r_upper)
+        r_lower = r_lower + 2
+        r_idx = r_idx + 1
+        j = j + 1
+        
+    right_hdr := PageHeader(0, hdr.lsn, PAGE_BTREE_LEAF(), hdr.flags, 1, r_idx, r_lower, r_upper, hdr.special_offset)
+    page_header_encode(right_page, right_hdr)
+    
+    return (left_page, right_page, split_key)
+
+# ── Internal Node Insertion ──────────────────────────────────────────────────
+def btree_internal_insert(
+    page: Bytes,
+    key: Int,
+    child_page_id: Int
+) -> Tuple[Bytes, Bool]:
+    hdr := page_header_decode(page)
+    free_space := hdr.upper - hdr.lower
+    if free_space < 18:
+        return (page, false)
+        
+    # Find insertion index to maintain sorted order
+    mut insert_idx := 0
+    while insert_idx < hdr.slot_count:
+        off := btree_get_cell_offset(page, insert_idx)
+        k := btree_internal_cell_get_key(page, off)
+        if key < k:
+            break
+        insert_idx = insert_idx + 1
+        
+    new_upper := hdr.upper - 16
+    btree_internal_cell_encode(page, new_upper, key, child_page_id)
+    
+    # Shift cell pointer array
+    mut i := hdr.slot_count
+    while i > insert_idx:
+        prev_off := btree_get_cell_offset(page, i - 1)
+        btree_set_cell_offset(page, i, prev_off)
+        i = i - 1
+    btree_set_cell_offset(page, insert_idx, new_upper)
+    
+    new_lower := hdr.lower + 2
+    new_hdr := PageHeader(
+        0,
+        hdr.lsn,
+        PAGE_BTREE_INTERNAL(),
+        hdr.flags,
+        hdr.format_version,
+        hdr.slot_count + 1,
+        new_lower,
+        new_upper,
+        hdr.special_offset
+    )
+    page_header_encode(page, new_hdr)
+    return (page, true)
+
+# ── B+ Tree Index Instance & Root Management ─────────────────────────────────
+struct BTreeIndex:
+    root_page_id: Int
+    depth: Int
+    next_page_id: Int
+    page_size: Int
+
+def btree_index_new(page_size: Int, root_page_id: Int) -> Tuple[BTreeIndex, Bytes]:
+    root_page := btree_node_init(page_size, PAGE_BTREE_LEAF(), 0)
+    tree := BTreeIndex(root_page_id, 1, root_page_id + 1, page_size)
+    return (tree, root_page)
+
+# ── Point Search ─────────────────────────────────────────────────────────────
+# Traverses tree from root down to leaf, returning (heap_page_id, heap_slot_id, found)
+def btree_search(
+    tree: BTreeIndex,
+    root_page: Bytes,
+    key: Int
+) -> Tuple[Int, Int, Bool]:
+    hdr := page_header_decode(root_page)
+    
+    if hdr.page_type == PAGE_BTREE_LEAF():
+        (idx, found) := btree_leaf_find_cell(root_page, key)
+        if found:
+            off := btree_get_cell_offset(root_page, idx)
+            p := btree_leaf_cell_get_page_id(root_page, off)
+            s := btree_leaf_cell_get_slot_id(root_page, off)
+            return (p, s, true)
+        return (0, 0, false)
+    return (0, 0, false)
+
+# Multi-level B+ Tree search traversing internal nodes down to leaf pages
+def btree_search_multi_level(
+    root_page: Bytes,
+    child_page_ids: List[Int],
+    child_page_buffers: List[Bytes],
+    key: Int
+) -> Tuple[Int, Int, Bool]:
+    hdr := page_header_decode(root_page)
+    if hdr.page_type == PAGE_BTREE_LEAF():
+        (idx, found) := btree_leaf_find_cell(root_page, key)
+        if found:
+            off := btree_get_cell_offset(root_page, idx)
+            p := btree_leaf_cell_get_page_id(root_page, off)
+            s := btree_leaf_cell_get_slot_id(root_page, off)
+            return (p, s, true)
+        return (0, 0, false)
+
+    if hdr.page_type == PAGE_BTREE_INTERNAL():
+        # Binary search child routing pointer
+        child_id := btree_internal_find_child(root_page, key)
+        # Find child buffer
+        mut c_idx := -1
+        mut i := 0
+        n_children := len(child_page_ids)
+        while i < n_children:
+            if child_page_ids[i] == child_id:
+                c_idx = i
+            i = i + 1
+
+        if c_idx >= 0:
+            child_buf := child_page_buffers[c_idx]
+            child_hdr := page_header_decode(child_buf)
+            if child_hdr.page_type == PAGE_BTREE_LEAF():
+                (l_idx, l_found) := btree_leaf_find_cell(child_buf, key)
+                if l_found:
+                    l_off := btree_get_cell_offset(child_buf, l_idx)
+                    lp := btree_leaf_cell_get_page_id(child_buf, l_off)
+                    ls := btree_leaf_cell_get_slot_id(child_buf, l_off)
+                    return (lp, ls, true)
+                # Lehman-Yao right-sibling check
+                r_sibling := btree_get_right_sibling(child_buf)
+                if r_sibling > 0:
+                    mut s_idx := -1
+                    mut s := 0
+                    while s < n_children:
+                        if child_page_ids[s] == r_sibling:
+                            s_idx = s
+                        s = s + 1
+                    if s_idx >= 0:
+                        sib_buf := child_page_buffers[s_idx]
+                        (sib_idx, sib_found) := btree_leaf_find_cell(sib_buf, key)
+                        if sib_found:
+                            sib_off := btree_get_cell_offset(sib_buf, sib_idx)
+                            sp := btree_leaf_cell_get_page_id(sib_buf, sib_off)
+                            ss := btree_leaf_cell_get_slot_id(sib_buf, sib_off)
+                            return (sp, ss, true)
+            elif child_hdr.page_type == PAGE_BTREE_INTERNAL():
+                # Recursive internal descent
+                return btree_search_multi_level(child_buf, child_page_ids, child_page_buffers, key)
+    return (0, 0, false)
+
+# ── Range Scan Iterator ──────────────────────────────────────────────────────
+# Collects all (page_id, slot_id) pairs for keys in [min_key, max_key]
+def btree_range_scan_leaf(
+    leaf_page: Bytes,
+    min_key: Int,
+    max_key: Int
+) -> Tuple[List[Int], List[Int]]:
+    mut out_pages := list_new()
+    mut out_slots := list_new()
+    
+    hdr := page_header_decode(leaf_page)
+    (start_idx, _) := btree_leaf_find_cell(leaf_page, min_key)
+    
+    mut i := start_idx
+    while i < hdr.slot_count:
+        off := btree_get_cell_offset(leaf_page, i)
+        k := btree_leaf_cell_get_key(leaf_page, off)
+        if k > max_key:
+            break
+        p := btree_leaf_cell_get_page_id(leaf_page, off)
+        s := btree_leaf_cell_get_slot_id(leaf_page, off)
+        list_push(out_pages, p)
+        list_push(out_slots, s)
+        i = i + 1
+    return (out_pages, out_slots)

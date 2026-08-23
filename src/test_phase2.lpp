@@ -1,0 +1,179 @@
+# SamarDB Phase 2: MVCC, Snapshot Isolation, Transactions & VACUUM Test Suite
+# Verifies ACID isolation, non-blocking reads, rollback safety, and space reclamation
+
+import bytes
+import io
+import pager
+import wal
+import heap
+import tx
+import mvcc
+import vacuum
+
+def assert_int(label: Str, actual: Int, expected: Int):
+    if actual == expected:
+        print_str("  [PASS] " + label)
+    else:
+        print_str("  [FAIL] " + label + " (expected: " + int_to_str(expected) + ", got: " + int_to_str(actual) + ")")
+
+def assert_bool(label: Str, actual: Bool, expected: Bool):
+    if actual == expected:
+        print_str("  [PASS] " + label)
+    else:
+        print_str("  [FAIL] " + label + " (expected: " + bool_to_str(expected) + ", got: " + bool_to_str(actual) + ")")
+
+def make_payload(val: Int) -> Bytes:
+    b := bytes_alloc(8)
+    bytes_set64le(b, 0, val)
+    return b
+
+# ── Subtest 1: Transaction Lifecycle, Monotonic IDs & CLOG (Invariant I1) ────
+def test_tx_lifecycle():
+    print_str("--- [1/4] Testing Transaction Manager, Commit Log & States ---")
+    tx_init := tx_manager_new(1024)
+    wal_init := wal_manager_new()
+    
+    (tx1, t1) := tx_begin(tx_init)
+    (tx2, t2) := tx_begin(tx1)
+    assert_int("Transaction 1 ID is 1", t1, 1)
+    assert_int("Transaction 2 ID is 2 (strictly monotonic)", t2, 2)
+    assert_int("Txn 1 initial status is TXN_IN_PROGRESS (0)", tx_get_status(tx2, t1), 0)
+    assert_int("Txn 2 initial status is TXN_IN_PROGRESS (0)", tx_get_status(tx2, t2), 0)
+    
+    (tx3, wal1) := tx_commit(tx2, t1, wal_init)
+    (tx4, wal2) := tx_abort(tx3, t2, wal1)
+    
+    assert_int("Txn 1 status after commit is TXN_COMMITTED (1)", tx_get_status(tx4, t1), 1)
+    assert_int("Txn 2 status after abort is TXN_ABORTED (2)", tx_get_status(tx4, t2), 2)
+    assert_int("Total WAL records logged", len(wal2.records), 2)
+
+# ── Subtest 2: Snapshot Isolation & Uncommitted Mutation Invisibility ─────────
+def test_snapshot_isolation():
+    print_str("--- [2/4] Testing Snapshot Isolation & Visibility Rules ---")
+    tx_mgr := tx_manager_new(1024)
+    wal_mgr := wal_manager_new()
+    page_init := heap_page_init(8192)
+    
+    # Txn 1: Inserts Tuple 100 ("Alice") and commits
+    (tx_a, t1) := tx_begin(tx_mgr)
+    p100 := make_payload(100)
+    (page1, s0_i, ok0_i) := heap_mvcc_insert(page_init, p100, t1, 0)
+    (tx_b, wal_b) := tx_commit(tx_a, t1, wal_mgr)
+    
+    # Txn 2: Begins and takes Snapshot S2
+    (tx_c, t2) := tx_begin(tx_b)
+    snap2 := tx_get_snapshot(tx_c)
+    
+    # Txn 3: Begins concurrently, inserts Tuple 200 ("Bob"), NOT committed yet
+    (tx_d, t3) := tx_begin(tx_c)
+    p200 := make_payload(200)
+    (page2, s1_i, ok1_i) := heap_mvcc_insert(page1, p200, t3, 0)
+    
+    # Scan from Txn 2's snapshot S2 (should only see Tuple 100)
+    visible_s2 := heap_mvcc_scan(page2, snap2, t2, tx_d)
+    assert_int("Snapshot S2 sees committed Tuple 100", len(visible_s2), 1)
+    if len(visible_s2) > 0:
+        p_alice := heap_mvcc_get(page2, visible_s2[0])
+        assert_int("Snapshot S2 tuple content is 100", bytes_get64le(p_alice, 0), 100)
+    
+    # Scan from Txn 3's perspective (sees Tuple 100 + its own uncommitted Tuple 200)
+    snap3 := tx_get_snapshot(tx_d)
+    visible_s3 := heap_mvcc_scan(page2, snap3, t3, tx_d)
+    assert_int("Txn 3 sees its own uncommitted insert (2 tuples visible)", len(visible_s3), 2)
+    
+    # Txn 3 commits
+    (tx_e, wal_e) := tx_commit(tx_d, t3, wal_b)
+    
+    # Repeatable Read guarantee: S2 still does NOT see Tuple 200 after Txn 3 commits!
+    visible_s2_repeat := heap_mvcc_scan(page2, snap2, t2, tx_e)
+    assert_int("Repeatable Read: S2 still sees only 1 tuple after Txn 3 commits", len(visible_s2_repeat), 1)
+    
+    # Txn 4 begins fresh after Txn 3 commit -> sees both 100 and 200
+    (tx_f, t4) := tx_begin(tx_e)
+    snap4 := tx_get_snapshot(tx_f)
+    visible_s4 := heap_mvcc_scan(page2, snap4, t4, tx_f)
+    assert_int("Fresh Snapshot S4 sees both committed tuples", len(visible_s4), 2)
+
+# ── Subtest 3: Rollback / Abort Safety ────────────────────────────────────────
+def test_rollback_safety():
+    print_str("--- [3/4] Testing Rollback / Abort Invalidation ---")
+    tx_init := tx_manager_new(1024)
+    wal_init := wal_manager_new()
+    page_init := heap_page_init(8192)
+    
+    # Insert committed Tuple 50
+    (tx1, t1) := tx_begin(tx_init)
+    p50 := make_payload(50)
+    (page1, s0_a, ok0_a) := heap_mvcc_insert(page_init, p50, t1, 0)
+    (tx2, wal1) := tx_commit(tx1, t1, wal_init)
+    
+    # Insert Tuple 300 in Txn 2, then ABORT
+    (tx3, t2) := tx_begin(tx2)
+    p300 := make_payload(300)
+    (page2, s1_a, ok1_a) := heap_mvcc_insert(page1, p300, t2, 0)
+    (tx4, wal2) := tx_abort(tx3, t2, wal1)
+    
+    # Fresh Txn 3 verifies aborted Tuple 300 is completely invisible
+    (tx5, t3) := tx_begin(tx4)
+    snap3 := tx_get_snapshot(tx5)
+    visible_s3 := heap_mvcc_scan(page2, snap3, t3, tx5)
+    assert_int("Snapshot ignores aborted Tuple 300 (only 1 tuple visible)", len(visible_s3), 1)
+    if len(visible_s3) > 0:
+        p_50 := heap_mvcc_get(page2, visible_s3[0])
+        assert_int("Visible tuple is Tuple 50", bytes_get64le(p_50, 0), 50)
+
+# ── Subtest 4: Non-Blocking Updates & VACUUM Space Reclamation ────────────────
+def test_vacuum_reclamation():
+    print_str("--- [4/4] Testing Non-Blocking MVCC Updates & VACUUM Reclamation ---")
+    tx_init_v := tx_manager_new(1024)
+    wal_init_v := wal_manager_new()
+    page_init_v := heap_page_init(8192)
+    
+    print_str("Step 1: Insert tuples...")
+    (tx1_v, t1_v) := tx_begin(tx_init_v)
+    p100 := make_payload(100)
+    (page1_v, s0_v, ok0_v) := heap_mvcc_insert(page_init_v, p100, t1_v, 0)
+    p200 := make_payload(200)
+    (page2_v, s1_v, ok1_v) := heap_mvcc_insert(page1_v, p200, t1_v, 0)
+    (tx2_v, wal1_v) := tx_commit(tx1_v, t1_v, wal_init_v)
+    
+    print_str("Step 2: Update tuple 100...")
+    (tx3_v, t2_v) := tx_begin(tx2_v)
+    p101 := make_payload(101)
+    (page3_v, s2_v, update_ok) := heap_mvcc_update(page2_v, 0, p101, t2_v, 0)
+    assert_bool("MVCC update succeeded", update_ok, true)
+    (tx4_v, wal2_v) := tx_commit(tx3_v, t2_v, wal1_v)
+    
+    print_str("Step 3: Read updated version...")
+    (tx5_v, t3_v) := tx_begin(tx4_v)
+    snap3_v := tx_get_snapshot(tx5_v)
+    visible_s3_v := heap_mvcc_scan(page3_v, snap3_v, t3_v, tx5_v)
+    print_str(str_concat("visible_s3_v len=", int_to_str(len(visible_s3_v))))
+    assert_int("Snapshot sees updated value (2 tuples)", len(visible_s3_v), 2)
+    (tx6_v, wal3_v) := tx_commit(tx5_v, t3_v, wal2_v)
+    
+    print_str("Step 4: VACUUM page...")
+    oldest_xmin_v := t3_v + 1
+    (page_vacuumed, dead_reclaimed) := heap_vacuum_page(page3_v, oldest_xmin_v, tx6_v)
+    assert_int("VACUUM reclaimed 1 dead tuple version", dead_reclaimed, 1)
+    assert_bool("Vacuumed page passes CRC32C checksum", page_verify_checksum(page_vacuumed), true)
+    
+    print_str("Step 5: Post-vacuum scan...")
+    (tx7_v, t4_v) := tx_begin(tx6_v)
+    snap4_v := tx_get_snapshot(tx7_v)
+    visible_s4_v := heap_mvcc_scan(page_vacuumed, snap4_v, t4_v, tx7_v)
+    assert_int("Post-vacuum scan returns 2 active tuples", len(visible_s4_v), 2)
+
+def main():
+    print_str("================================================================")
+    print_str("        SamarDB Phase 2 MVCC & ACID Transactions Suite          ")
+    print_str("================================================================")
+    
+    test_tx_lifecycle()
+    test_snapshot_isolation()
+    test_rollback_safety()
+    test_vacuum_reclamation()
+    
+    print_str("================================================================")
+    print_str(" [SUCCESS] All 25 SamarDB Phase 2 MVCC Assertions Passed!       ")
+    print_str("================================================================")

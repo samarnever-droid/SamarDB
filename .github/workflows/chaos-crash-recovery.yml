@@ -1,0 +1,43 @@
+﻿name: SamarDB Chaos Fault-Injection, ARIES Crash Recovery & Invariant Suite
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  chaos-and-invariants:
+    name: "Adversarial Chaos & ARIES Crash Recovery"
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout SamarDB Repository
+        uses: actions/checkout@v4
+
+      - name: Setup L++ Pure Native AOT Toolchain
+        run: |
+          if (Test-Path bin/lpp.exe) {
+            echo "$((Get-Location).Path)\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          } else {
+            irm https://lplusplus.bond/install.ps1 | iex
+            echo "$HOME\.lpp\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+
+      - name: Verify L++ Installation
+        run: |
+          lpp --version
+
+      - name: Compile Chaos & Storage Suites
+        run: |
+          lpp src/test_father_chaos.lpp
+          lpp src/test_phase1.lpp
+
+      - name: Execute 39-Assertion 'Father of Edge Cases' Chaos Matrix
+        run: |
+          .\src\test_father_chaos.exe
+
+      - name: Execute ARIES WAL REDO Idempotency & Recovery Gate
+        run: |
+          .\src\test_phase1.exe

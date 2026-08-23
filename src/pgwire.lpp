@@ -1,0 +1,370 @@
+# samardb-pgwire: PostgreSQL Wire Protocol v3.0 Frontend
+# Implements docs/adr/0007-network-protocol.md
+# Deterministic SimSocket model — no OS networking in this module.
+
+import bytes
+import schema
+import parser
+import exec
+import opt
+
+# ── Type OID constants (PostgreSQL wire protocol) ─────────────────────────────
+def PG_OID_INT4() -> Int:
+    return 23
+
+def PG_OID_TEXT() -> Int:
+    return 25
+
+def PG_OID_BOOL() -> Int:
+    return 16
+
+def PG_FORMAT_TEXT() -> Int:
+    return 0
+
+# ── SimSocket ─────────────────────────────────────────────────────────────────
+# Deterministic injectable socket: client writes to in_buf, server reads from it.
+# Server writes to out_buf; client reads from it.
+# All buffers are fixed at 64 KB — sufficient for test suite and small result sets.
+
+def SIMSOCK_BUF_SIZE() -> Int:
+    return 65536
+
+struct SimSocket:
+    in_buf:    Bytes   # client → server data
+    out_buf:   Bytes   # server → client data
+    in_pos:    Int     # read cursor into in_buf
+    out_pos:   Int     # write cursor into out_buf (next byte to write)
+    connected: Bool
+
+def simsock_new() -> SimSocket:
+    return SimSocket(
+        bytes_alloc(SIMSOCK_BUF_SIZE()),
+        bytes_alloc(SIMSOCK_BUF_SIZE()),
+        0,
+        0,
+        true
+    )
+
+# ── Client writes into in_buf (simulates client sending data) ─────────────────
+def simsock_client_write_byte(sock: SimSocket, pos: Int, b: Int) -> SimSocket:
+    bytes_set8(sock.in_buf, pos, b)
+    return sock
+
+def simsock_client_write_int32be(sock: SimSocket, pos: Int, v: Int) -> SimSocket:
+    bytes_set32be(sock.in_buf, pos, v)
+    return sock
+
+def simsock_client_write_int16be(sock: SimSocket, pos: Int, v: Int) -> SimSocket:
+    bytes_set16be(sock.in_buf, pos, v)
+    return sock
+
+def simsock_client_write_str(sock: SimSocket, pos: Int, s: Str) -> Int:
+    # Write null-terminated string into in_buf at pos; return new_pos
+    # Buffer mutation goes through the handle (reference semantic)
+    mut i := 0
+    mut cur := pos
+    while i < str_len(s):
+        bytes_set8(sock.in_buf, cur, ord(char_at(s, i)))
+        cur = cur + 1
+        i = i + 1
+    bytes_set8(sock.in_buf, cur, 0)    # null terminator
+    return cur + 1
+
+# ── Server writes to out_buf ──────────────────────────────────────────────────
+def pgwire_write_byte(sock: SimSocket, b: Int) -> SimSocket:
+    bytes_set8(sock.out_buf, sock.out_pos, b)
+    return SimSocket(sock.in_buf, sock.out_buf, sock.in_pos, sock.out_pos + 1, sock.connected)
+
+def pgwire_write_int32be(sock: SimSocket, v: Int) -> SimSocket:
+    bytes_set32be(sock.out_buf, sock.out_pos, v)
+    return SimSocket(sock.in_buf, sock.out_buf, sock.in_pos, sock.out_pos + 4, sock.connected)
+
+def pgwire_write_int16be(sock: SimSocket, v: Int) -> SimSocket:
+    bytes_set16be(sock.out_buf, sock.out_pos, v)
+    return SimSocket(sock.in_buf, sock.out_buf, sock.in_pos, sock.out_pos + 2, sock.connected)
+
+def pgwire_write_str(sock: SimSocket, s: Str) -> SimSocket:
+    # Write string bytes + null terminator to out_buf
+    mut i := 0
+    mut cur_sock := sock
+    while i < str_len(s):
+        cur_sock = pgwire_write_byte(cur_sock, ord(char_at(s, i)))
+        i = i + 1
+    cur_sock = pgwire_write_byte(cur_sock, 0)    # null terminator
+    return cur_sock
+
+# ── Server reads from in_buf ──────────────────────────────────────────────────
+def pgwire_read_byte(sock: SimSocket) -> Tuple[SimSocket, Int]:
+    b := bytes_get8(sock.in_buf, sock.in_pos)
+    return (SimSocket(sock.in_buf, sock.out_buf, sock.in_pos + 1, sock.out_pos, sock.connected), b)
+
+def pgwire_read_int32be(sock: SimSocket) -> Tuple[SimSocket, Int]:
+    v := bytes_get32be(sock.in_buf, sock.in_pos)
+    return (SimSocket(sock.in_buf, sock.out_buf, sock.in_pos + 4, sock.out_pos, sock.connected), v)
+
+def pgwire_read_int16be(sock: SimSocket) -> Tuple[SimSocket, Int]:
+    v := bytes_get16be(sock.in_buf, sock.in_pos)
+    return (SimSocket(sock.in_buf, sock.out_buf, sock.in_pos + 2, sock.out_pos, sock.connected), v)
+
+def pgwire_read_str(sock: SimSocket) -> Tuple[SimSocket, Str]:
+    # Read null-terminated string from in_buf
+    mut cur := sock.in_pos
+    mut result := ""
+    while cur < SIMSOCK_BUF_SIZE():
+        b := bytes_get8(sock.in_buf, cur)
+        if b == 0:
+            cur = cur + 1
+            break
+        result = str_concat(result, char_at_code(b))
+        cur = cur + 1
+    new_sock := SimSocket(sock.in_buf, sock.out_buf, cur, sock.out_pos, sock.connected)
+    return (new_sock, result)
+
+# Helper: convert ASCII code back to single-character string
+def char_at_code(code: Int) -> Str:
+    # Map code to printable char using int_to_str workaround
+    # Uses a lookup string for printable ASCII 32..126
+    lut := " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    if code >= 32 && code <= 126:
+        return str_substr(lut, code - 32, 1)
+    return "?"
+
+# ── Out-buffer read back (for test verification) ──────────────────────────────
+def pgwire_out_read_byte(sock: SimSocket, pos: Int) -> Int:
+    return bytes_get8(sock.out_buf, pos)
+
+def pgwire_out_read_int32be(sock: SimSocket, pos: Int) -> Int:
+    return bytes_get32be(sock.out_buf, pos)
+
+def pgwire_out_read_int16be(sock: SimSocket, pos: Int) -> Int:
+    return bytes_get16be(sock.out_buf, pos)
+
+def pgwire_out_read_str(sock: SimSocket, pos: Int) -> Str:
+    mut cur := pos
+    mut result := ""
+    while cur < SIMSOCK_BUF_SIZE():
+        b := bytes_get8(sock.out_buf, cur)
+        if b == 0:
+            break
+        result = str_concat(result, char_at_code(b))
+        cur = cur + 1
+    return result
+
+# ── Backend Messages (Server → Client) ───────────────────────────────────────
+
+# AuthenticationOK: R + length=8 + auth_type=0
+# Total: 9 bytes
+def pgwire_send_auth_ok(sock: SimSocket) -> SimSocket:
+    mut s := pgwire_write_byte(sock, 82)      # 'R' = 0x52
+    s = pgwire_write_int32be(s, 8)
+    s = pgwire_write_int32be(s, 0)
+    return s
+
+# BackendKeyData: K + length=12 + pid + secret_key
+# Total: 13 bytes
+def pgwire_send_backend_key(sock: SimSocket, pid: Int, key: Int) -> SimSocket:
+    mut s := pgwire_write_byte(sock, 75)      # 'K' = 0x4B
+    s = pgwire_write_int32be(s, 12)
+    s = pgwire_write_int32be(s, pid)
+    s = pgwire_write_int32be(s, key)
+    return s
+
+# ReadyForQuery: Z + length=5 + status_byte
+# status: 'I'=73 Idle, 'T'=84 InTx, 'E'=69 Error
+# Total: 6 bytes
+def pgwire_send_ready_for_query(sock: SimSocket, status: Int) -> SimSocket:
+    mut s := pgwire_write_byte(sock, 90)      # 'Z' = 0x5A
+    s = pgwire_write_int32be(s, 5)
+    s = pgwire_write_byte(s, status)
+    return s
+
+# CommandComplete: C + length + tag\0
+def pgwire_send_command_complete(sock: SimSocket, tag: Str) -> SimSocket:
+    mut s := pgwire_write_byte(sock, 67)      # 'C' = 0x43
+    # length = 4 (itself) + len(tag) + 1 (null)
+    msg_len := 4 + str_len(tag) + 1
+    s = pgwire_write_int32be(s, msg_len)
+    s = pgwire_write_str(s, tag)
+    return s
+
+# ErrorResponse: E + length + 'S' + "ERROR\0" + 'M' + message\0 + '\0'
+def pgwire_send_error(sock: SimSocket, message: Str) -> SimSocket:
+    mut s := pgwire_write_byte(sock, 69)      # 'E' = 0x45
+    # length = 4 + 1+'S'+'E','R','R','O','R',0 + 1+'M'+msg,0 + 1(term)
+    # = 4 + 1 + 6 + 1 + str_len(message) + 1 + 1
+    msg_len := 4 + 1 + 6 + 1 + str_len(message) + 1 + 1
+    s = pgwire_write_int32be(s, msg_len)
+    s = pgwire_write_byte(s, 83)              # 'S'
+    s = pgwire_write_str(s, "ERROR")
+    s = pgwire_write_byte(s, 77)              # 'M'
+    s = pgwire_write_str(s, message)
+    s = pgwire_write_byte(s, 0)              # terminator
+    return s
+
+# RowDescription: T + length + ncols + per-col descriptors
+# col_types is a parallel list of PG OID integers per column
+def pgwire_send_row_description(sock: SimSocket, col_names: List[Str], col_types: List[Int]) -> SimSocket:
+    ncols := len(col_names)
+    # Compute payload size:
+    # 2 (ncols) + per col: strlen(name)+1 + 4+2+4+2+4+2 = 18 bytes fixed per col + name
+    mut names_len := 0
+    mut ni := 0
+    while ni < ncols:
+        names_len = names_len + str_len(col_names[ni]) + 1
+        ni = ni + 1
+    payload_len := 2 + names_len + ncols * 18
+    msg_len := 4 + payload_len
+
+    mut s := pgwire_write_byte(sock, 84)      # 'T' = 0x54
+    s = pgwire_write_int32be(s, msg_len)
+    s = pgwire_write_int16be(s, ncols)
+    mut ci := 0
+    while ci < ncols:
+        s = pgwire_write_str(s, col_names[ci])
+        s = pgwire_write_int32be(s, 0)        # table OID = 0
+        s = pgwire_write_int16be(s, 0)        # attribute number = 0
+        oid := col_types[ci]
+        s = pgwire_write_int32be(s, oid)      # type OID
+        if oid == PG_OID_INT4():
+            s = pgwire_write_int16be(s, 4)    # type size = 4 for int4
+        else:
+            s = pgwire_write_int16be(s, -1)   # variable length
+        s = pgwire_write_int32be(s, -1)       # type modifier = -1
+        s = pgwire_write_int16be(s, PG_FORMAT_TEXT())
+        ci = ci + 1
+    return s
+
+# DataRow: D + length + ncols + per-value (len + text bytes)
+# row is a List[Int] of column values (integers only in Phase 6)
+def pgwire_send_data_row(sock: SimSocket, row: List[Int], ncols: Int) -> SimSocket:
+    # Convert each int to its text representation and compute total length
+    mut val_strs := list_new()
+    mut vi := 0
+    while vi < ncols:
+        list_push(val_strs, int_to_str(row[vi]))
+        vi = vi + 1
+    # payload: 2 (ncols) + sum(4 + len(val_str)) per col
+    mut vals_byte_len := 0
+    mut vj := 0
+    while vj < ncols:
+        vals_byte_len = vals_byte_len + 4 + str_len(val_strs[vj])
+        vj = vj + 1
+    payload_len := 2 + vals_byte_len
+    msg_len := 4 + payload_len
+
+    mut s := pgwire_write_byte(sock, 68)      # 'D' = 0x44
+    s = pgwire_write_int32be(s, msg_len)
+    s = pgwire_write_int16be(s, ncols)
+    mut vk := 0
+    while vk < ncols:
+        vstr := val_strs[vk]
+        s = pgwire_write_int32be(s, str_len(vstr))
+        s = pgwire_write_str_no_null(s, vstr)
+        vk = vk + 1
+    return s
+
+# Write string bytes WITHOUT null terminator (for DataRow field values)
+def pgwire_write_str_no_null(sock: SimSocket, s: Str) -> SimSocket:
+    mut i := 0
+    mut cur_sock := sock
+    while i < str_len(s):
+        cur_sock = pgwire_write_byte(cur_sock, ord(char_at(s, i)))
+        i = i + 1
+    return cur_sock
+
+# ── Startup Message Reader (Client → Server) ──────────────────────────────────
+# Returns (sock_after_read, proto_major, user, database)
+def pgwire_read_startup(sock: SimSocket) -> Tuple[SimSocket, Int, Str, Str]:
+    # Read total length (4 bytes)
+    (s1, total_len) := pgwire_read_int32be(sock)
+    # Read protocol version (4 bytes: major 16-bit BE + minor 16-bit BE)
+    (s2, proto_major) := pgwire_read_int16be(s1)
+    (s3, proto_minor) := pgwire_read_int16be(s2)
+    # Read key=value pairs until double-null
+    mut user_str := "samardb"
+    mut db_str := "samardb"
+    mut cur_sock := s3
+    mut reading := true
+    while reading:
+        (s_key, key_s) := pgwire_read_str(cur_sock)
+        cur_sock = s_key
+        if str_len(key_s) == 0:
+            reading = false
+        else:
+            (s_val, val_s) := pgwire_read_str(cur_sock)
+            cur_sock = s_val
+            if str_eq_ci(key_s, "user"):
+                user_str = val_s
+            elif str_eq_ci(key_s, "database"):
+                db_str = val_s
+    return (cur_sock, proto_major, user_str, db_str)
+
+# ── Query Message Reader (Client → Server) ────────────────────────────────────
+# Returns (sock_after_read, sql_string)
+def pgwire_read_query(sock: SimSocket) -> Tuple[SimSocket, Str]:
+    # type byte 'Q' already validated by caller
+    (s1, msg_len) := pgwire_read_int32be(sock)
+    (s2, sql_str) := pgwire_read_str(s1)
+    return (s2, sql_str)
+
+# ── Full Startup Handshake ────────────────────────────────────────────────────
+# Reads startup, validates proto=3, sends AuthOK + BackendKeyData + ReadyForQuery
+# Returns (sock_after_handshake, ok)
+def pgwire_do_startup(sock: SimSocket) -> Tuple[SimSocket, Bool]:
+    (s1, proto_major, user_s, db_s) := pgwire_read_startup(sock)
+    if proto_major != 3:
+        s_err := pgwire_send_error(s1, "Unsupported protocol version")
+        return (s_err, false)
+    s2 := pgwire_send_auth_ok(s1)
+    s3 := pgwire_send_backend_key(s2, 1, 12345)
+    s4 := pgwire_send_ready_for_query(s3, 73)    # 'I' = Idle
+    return (s4, true)
+
+# ── Simple Query Handler ──────────────────────────────────────────────────────
+# Parses and executes a SQL string from the given parsed query.
+# Sends RowDescription + DataRow×N + CommandComplete, or ErrorResponse.
+# Returns sock after writing all response frames.
+# rows: list of records (List[List[Int]]), col_names and col_pg_types from schema
+def pgwire_handle_query_result(
+    sock: SimSocket,
+    pq: ParsedQuery,
+    rows: List[Bytes],
+    col_names: List[Str],
+    col_pg_types: List[Int]
+) -> SimSocket:
+    ncols := len(col_names)
+    if pq.query_type == QUERY_SELECT():
+        mut s := pgwire_send_row_description(sock, col_names, col_pg_types)
+        nrows := len(rows)
+        mut ri := 0
+        while ri < nrows:
+            # Decode all integer column values from the binary record
+            mut row_vals := list_new()
+            mut ci := 0
+            while ci < ncols:
+                list_push(row_vals, record_get_int(rows[ri], ci))
+                ci = ci + 1
+            s = pgwire_send_data_row(s, row_vals, ncols)
+            ri = ri + 1
+        tag := str_concat("SELECT ", int_to_str(nrows))
+        s = pgwire_send_command_complete(s, tag)
+        return pgwire_send_ready_for_query(s, 73)
+
+    if pq.query_type == QUERY_INSERT():
+        tag := "INSERT 0 1"
+        mut s := pgwire_send_command_complete(sock, tag)
+        return pgwire_send_ready_for_query(s, 73)
+
+    if pq.query_type == QUERY_UPDATE():
+        tag := str_concat("UPDATE ", int_to_str(len(rows)))
+        mut s := pgwire_send_command_complete(sock, tag)
+        return pgwire_send_ready_for_query(s, 73)
+
+    if pq.query_type == QUERY_DELETE():
+        tag := str_concat("DELETE ", int_to_str(len(rows)))
+        mut s := pgwire_send_command_complete(sock, tag)
+        return pgwire_send_ready_for_query(s, 73)
+
+    # Fallback: error
+    mut s := pgwire_send_error(sock, "Unsupported query type")
+    return pgwire_send_ready_for_query(s, 73)

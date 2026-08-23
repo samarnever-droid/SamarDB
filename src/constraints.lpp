@@ -1,0 +1,178 @@
+# samardb-constraints: Relational Integrity, Foreign Keys & Unique Constraints Engine
+# Implements declarative NOT NULL, CHECK range, UNIQUE, and FOREIGN KEY referential
+# integrity rules with ON DELETE CASCADE, RESTRICT, and SET_NULL action handling.
+
+import bytes
+import schema
+import btree
+import catalog
+
+# ── Action & Type Constants ───────────────────────────────────────────────────
+def FK_ACTION_RESTRICT() -> Int:
+    return 1
+
+def FK_ACTION_CASCADE() -> Int:
+    return 2
+
+def FK_ACTION_SET_NULL() -> Int:
+    return 3
+
+def CONSTRAINT_NOT_NULL() -> Int:
+    return 1
+
+def CONSTRAINT_CHECK_RANGE() -> Int:
+    return 2
+
+def CONSTRAINT_UNIQUE() -> Int:
+    return 3
+
+def CONSTRAINT_FOREIGN_KEY() -> Int:
+    return 4
+
+# ── Constraint Data Structures ─────────────────────────────────────────────────
+struct ForeignKey:
+    fk_id:            Int
+    name:             Str
+    child_table_id:   Int
+    child_col_idx:    Int
+    parent_table_id:  Int
+    parent_col_idx:   Int
+    on_delete_action: Int
+
+struct CheckConstraint:
+    check_id: Int
+    name:     Str
+    table_id: Int
+    col_idx:  Int
+    min_val:  Int
+    max_val:  Int
+
+struct UniqueConstraint:
+    uc_id:    Int
+    name:     Str
+    table_id: Int
+    col_idx:  Int
+
+struct ConstraintManager:
+    fks:     List[ForeignKey]
+    checks:  List[CheckConstraint]
+    uniques: List[UniqueConstraint]
+
+# ── Constructor & Registration ─────────────────────────────────────────────────
+def constraint_manager_new() -> ConstraintManager:
+    return ConstraintManager(list_new(), list_new(), list_new())
+
+def constraint_add_fk(cm: ConstraintManager, fk: ForeignKey) -> ConstraintManager:
+    mut new_fks := list_new()
+    mut i := 0
+    n := len(cm.fks)
+    while i < n:
+        list_push(new_fks, cm.fks[i])
+        i = i + 1
+    list_push(new_fks, fk)
+    return ConstraintManager(new_fks, cm.checks, cm.uniques)
+
+def constraint_add_check(cm: ConstraintManager, check: CheckConstraint) -> ConstraintManager:
+    mut new_checks := list_new()
+    mut i := 0
+    n := len(cm.checks)
+    while i < n:
+        list_push(new_checks, cm.checks[i])
+        i = i + 1
+    list_push(new_checks, check)
+    return ConstraintManager(cm.fks, new_checks, cm.uniques)
+
+def constraint_add_unique(cm: ConstraintManager, uc: UniqueConstraint) -> ConstraintManager:
+    mut new_uniques := list_new()
+    mut i := 0
+    n := len(cm.uniques)
+    while i < n:
+        list_push(new_uniques, cm.uniques[i])
+        i = i + 1
+    list_push(new_uniques, uc)
+    return ConstraintManager(cm.fks, cm.checks, new_uniques)
+
+# ── Validation Primitives ──────────────────────────────────────────────────────
+
+# 1. NOT NULL validation
+def constraint_validate_not_null(is_null: Bool) -> Bool:
+    return !is_null
+
+# 2. CHECK range validation
+def constraint_validate_check(cm: ConstraintManager, table_id: Int, col_idx: Int, val: Int) -> Bool:
+    mut i := 0
+    n := len(cm.checks)
+    while i < n:
+        cc := cm.checks[i]
+        if cc.table_id == table_id && cc.col_idx == col_idx:
+            if val < cc.min_val || val > cc.max_val:
+                return false
+        i = i + 1
+    return true
+
+# 3. UNIQUE constraint validation: checks if candidate key already exists
+def constraint_validate_unique(existing_keys: List[Int], new_key: Int) -> Bool:
+    mut i := 0
+    n := len(existing_keys)
+    while i < n:
+        if existing_keys[i] == new_key:
+            return false # Duplicate key detected!
+        i = i + 1
+    return true
+
+# 4. FOREIGN KEY insert validation: verifies parent key exists in parent table
+def constraint_validate_fk_insert(cm: ConstraintManager, child_table_id: Int, child_col_idx: Int, fk_val: Int, parent_keys: List[Int]) -> Bool:
+    # If fk_val is 0 (or null in optional FK), it passes
+    if fk_val == 0:
+        return true
+
+    mut fk_found := false
+    mut i := 0
+    n_fks := len(cm.fks)
+    while i < n_fks:
+        fk := cm.fks[i]
+        if fk.child_table_id == child_table_id && fk.child_col_idx == child_col_idx:
+            # Foreign key rule found: check parent keys for match
+            mut p := 0
+            n_parents := len(parent_keys)
+            while p < n_parents:
+                if parent_keys[p] == fk_val:
+                    return true # Valid referential link
+                p = p + 1
+            return false # Orphaned child row: parent key does not exist!
+        i = i + 1
+    # No FK constraint on this column
+    return true
+
+# ── Referential Action Evaluation on Parent DELETE ─────────────────────────────
+# Finds matching child row indices referencing a deleted parent key
+def constraint_find_matching_children(parent_key: Int, child_fk_keys: List[Int]) -> List[Int]:
+    mut matches := list_new()
+    mut i := 0
+    n := len(child_fk_keys)
+    while i < n:
+        if child_fk_keys[i] == parent_key:
+            list_push(matches, i)
+        i = i + 1
+    return matches
+
+# Evaluates whether parent deletion can proceed, and what action to apply:
+# Returns (action_code, affected_child_indices, can_proceed)
+def constraint_evaluate_delete(cm: ConstraintManager, parent_table_id: Int, parent_key: Int, child_table_id: Int, child_fk_keys: List[Int]) -> Tuple[Int, List[Int], Bool]:
+    mut i := 0
+    n_fks := len(cm.fks)
+    while i < n_fks:
+        fk := cm.fks[i]
+        if fk.parent_table_id == parent_table_id && fk.child_table_id == child_table_id:
+            matching_children := constraint_find_matching_children(parent_key, child_fk_keys)
+            n_matches := len(matching_children)
+            if n_matches > 0:
+                if fk.on_delete_action == 1: # RESTRICT
+                    return (1, matching_children, false) # Block parent deletion!
+                if fk.on_delete_action == 2: # CASCADE
+                    return (2, matching_children, true)  # Proceed with cascade deletion
+                if fk.on_delete_action == 3: # SET_NULL
+                    return (3, matching_children, true)  # Proceed with setting FK to null
+        i = i + 1
+    # No FK dependencies found: proceed freely
+    return (0, list_new(), true)

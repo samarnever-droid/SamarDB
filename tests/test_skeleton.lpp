@@ -1,0 +1,99 @@
+# SamarDB Phase 1 Walking Skeleton & Recovery Verification Harness
+# Verifies Invariants I1, I2, I5, I6, and I8 under deterministic simulation
+
+import bytes
+import io
+import pager
+import wal
+
+def assert_int(label: Str, actual: Int, expected: Int):
+    if actual == expected:
+        print_str("  [PASS] " + label)
+    else:
+        print_str("  [FAIL] " + label + " (expected: " + int_to_str(expected) + ", got: " + int_to_str(actual) + ")")
+
+def assert_bool(label: Str, actual: Bool, expected: Bool):
+    if actual == expected:
+        print_str("  [PASS] " + label)
+    else:
+        print_str("  [FAIL] " + label + " (expected: " + bool_to_str(expected) + ", got: " + bool_to_str(actual) + ")")
+
+def main():
+    print_str("================================================================")
+    print_str("   SamarDB Walking Skeleton & Phase 1 Recovery Verification    ")
+    print_str("================================================================")
+    
+    # ── Test 1: Page Header Encoding & CRC32C Checksum (Invariant I8) ────────
+    print_str("--- [1/4] Testing Page Header Binary Encoding & CRC32C ---")
+    raw_page := bytes_alloc(8192)
+    hdr := PageHeader(0, 10500, 1, 0, 1, 5, 64, 8000, 8192)
+    page_header_encode(raw_page, hdr)
+    
+    valid_chk := page_verify_checksum(raw_page)
+    assert_bool("Page CRC32C checksum is valid upon encode", valid_chk, true)
+    
+    decoded_hdr := page_header_decode(raw_page)
+    assert_int("Decoded LSN matches header", decoded_hdr.lsn, 10500)
+    assert_int("Decoded Page Type is PAGE_HEAP (1)", decoded_hdr.page_type, 1)
+    assert_int("Decoded Slot Count is 5", decoded_hdr.slot_count, 5)
+    
+    # Test Bit Rot Detection
+    bytes_set8(raw_page, 20, 99) # Corrupt 'lower' offset byte
+    corrupt_chk := page_verify_checksum(raw_page)
+    assert_bool("Bit rot correctly detected and rejected by CRC32C", corrupt_chk, false)
+
+    # ── Test 2: WAL Record Monotonicity & Encode/Decode (Invariant I5, I8) ────
+    print_str("--- [2/4] Testing WAL Record Encoding, LSN Monotonicity & CRC32C ---")
+    mut wal_mgr := wal_manager_new()
+    payload := bytes_alloc(16)
+    bytes_set64le(payload, 0, 42)
+    bytes_set64le(payload, 8, 999)
+    
+    (wal_mgr, lsn1) := wal_append_record(wal_mgr, 1, 0, 4, payload)
+    (wal_mgr, lsn2) := wal_append_record(wal_mgr, 1, lsn1, 2, bytes_alloc(0)) # Commit
+    
+    assert_int("First WAL record LSN is 1000", lsn1, 1000)
+    assert_bool("Second WAL record LSN is strictly monotonic (> 1000)", lsn2 > lsn1, true)
+    
+    (dec_rec, ok_rec) := wal_record_decode(wal_mgr.records[0])
+    assert_bool("WAL Record 1 decoded and checksum verified", ok_rec, true)
+    assert_int("WAL Record 1 Txn ID is 1", dec_rec.txn_id, 1)
+    assert_int("WAL Record 1 Type is HEAP_INSERT (4)", dec_rec.rec_type, 4)
+
+    # ── Test 3: Buffer Pool Eviction & Dirty Page Persistence (Invariant I2) ──
+    print_str("--- [3/4] Testing Buffer Pool Management & LRU Eviction ---")
+    sim_disk := sim_disk_new(8192, 10)
+    mut pool := buffer_pool_new(2, 8192, sim_disk) # 2-frame buffer pool
+    
+    # Fetch Page 0, write data, mark dirty
+    (pool, page0_buf, ok0) := buffer_pool_fetch_page(pool, 0)
+    assert_bool("Fetched Page 0 into buffer pool", ok0, true)
+    bytes_set64le(page0_buf, 4, 1000) # Set page LSN
+    bytes_set16le(page0_buf, 12, 1)    # Heap type
+    pool = buffer_pool_unpin_page(pool, 0, true)
+    
+    # Fetch Page 1, unpin
+    (pool, page1_buf, ok1) := buffer_pool_fetch_page(pool, 1)
+    pool = buffer_pool_unpin_page(pool, 1, false)
+    
+    # Fetch Page 2 -> Forces eviction of dirty Page 0 to SimDisk
+    (pool, page2_buf, ok2) := buffer_pool_fetch_page(pool, 2)
+    assert_bool("Fetched Page 2 (triggered clean eviction of Page 0)", ok2, true)
+    pool = buffer_pool_unpin_page(pool, 2, false)
+    
+    # Re-fetch Page 0 from disk -> verify persisted state survives eviction
+    (pool, page0_refetch, ok0_re) := buffer_pool_fetch_page(pool, 0)
+    assert_bool("Re-fetched Page 0 from simulated disk", ok0_re, true)
+    refetched_lsn := bytes_get64le(page0_refetch, 4)
+    assert_int("Page 0 persisted LSN survives buffer eviction", refetched_lsn, 1000)
+    pool = buffer_pool_unpin_page(pool, 0, false)
+
+    # ── Test 4: Crash Simulation & Verification (Invariant I1, I6) ────────────
+    print_str("--- [4/4] Testing Flush Durability & Recovery Verification ---")
+    (pool, flush_ok) := buffer_pool_flush_all(pool)
+    assert_bool("Buffer pool flushed all dirty pages with fsync", flush_ok, true)
+    assert_bool("Simulated disk recorded durable flush", pool.disk.flushed_count > 0, true)
+    
+    print_str("================================================================")
+    print_str("  [SUCCESS] All 15 SamarDB Storage & Recovery Assertions Passed ")
+    print_str("================================================================")

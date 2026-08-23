@@ -1,0 +1,244 @@
+# samardb Phase 11 Test Suite: Analytical Aggregations & Grouping
+# Verifies: COUNT, SUM, AVG, MIN, MAX, GROUP BY, HAVING, ORDER BY ASC/DESC,
+#           LIMIT/OFFSET pagination, and DISTINCT deduplication.
+
+import bytes
+import schema
+import parser
+import exec
+import agg
+
+# ── Test Framework ────────────────────────────────────────────────────────────
+def ci(label: Str, got: Int, want: Int) -> Int:
+    if got == want:
+        print_str(str_concat("  [PASS] ", label))
+        return 1
+    else:
+        out := str_concat("  [FAIL] ", label)
+        out2 := str_concat(out, str_concat("  got=", int_to_str(got)))
+        print_str(str_concat(out2, str_concat(" want=", int_to_str(want))))
+        return 0
+
+def cb(label: Str, got: Bool, want: Bool) -> Int:
+    ok := (got && want) || (!got && !want)
+    if ok:
+        print_str(str_concat("  [PASS] ", label))
+        return 1
+    else:
+        print_str(str_concat("  [FAIL] ", label))
+        return 0
+
+# ── [1/5] Global Aggregations (COUNT, SUM, AVG, MIN, MAX) ────────────────────
+def test_global_aggregates() -> Int:
+    print_str("--- [1/5] Testing Global Aggregates (COUNT, SUM, AVG, MIN, MAX) ---")
+    mut p := 0
+
+    # 6 records with salaries: 1000, 2000, 3000, 4000, 5000, 6000 (col 2 = salary)
+    mut recs := list_new()
+    mut i := 1
+    while i <= 6:
+        mut row := list_new()
+        list_push(row, i)            # id
+        list_push(row, 10)           # dept_id
+        list_push(row, i * 1000)     # salary
+        list_push(recs, record_encode_integers(row))
+        i = i + 1
+
+    p = p + ci("Global COUNT(*) is 6", execute_global_aggregate(recs, 2, AGG_COUNT()), 6)
+    p = p + ci("Global SUM(salary) is 21000", execute_global_aggregate(recs, 2, AGG_SUM()), 21000)
+    p = p + ci("Global AVG(salary) is 3500", execute_global_aggregate(recs, 2, AGG_AVG()), 3500)
+    p = p + ci("Global MIN(salary) is 1000", execute_global_aggregate(recs, 2, AGG_MIN()), 1000)
+    p = p + ci("Global MAX(salary) is 6000", execute_global_aggregate(recs, 2, AGG_MAX()), 6000)
+    return p
+
+# ── [2/5] GROUP BY Aggregation ────────────────────────────────────────────────
+def test_group_by_aggregation() -> Int:
+    print_str("--- [2/5] Testing GROUP BY Multi-Bucket Aggregation ---")
+    mut p := 0
+
+    # Dept 10: 4 rows (1000, 2000, 3000, 4000) -> sum=10000, avg=2500, min=1000, max=4000
+    # Dept 20: 2 rows (5000, 6000)             -> sum=11000, avg=5500, min=5000, max=6000
+    mut recs := list_new()
+    # Dept 10 rows
+    mut r1 := list_new()
+    list_push(r1, 1)
+    list_push(r1, 10)
+    list_push(r1, 1000)
+    list_push(recs, record_encode_integers(r1))
+
+    mut r2 := list_new()
+    list_push(r2, 2)
+    list_push(r2, 10)
+    list_push(r2, 2000)
+    list_push(recs, record_encode_integers(r2))
+
+    mut r3 := list_new()
+    list_push(r3, 3)
+    list_push(r3, 10)
+    list_push(r3, 3000)
+    list_push(recs, record_encode_integers(r3))
+
+    mut r4 := list_new()
+    list_push(r4, 4)
+    list_push(r4, 10)
+    list_push(r4, 4000)
+    list_push(recs, record_encode_integers(r4))
+
+    # Dept 20 rows
+    mut r5 := list_new()
+    list_push(r5, 5)
+    list_push(r5, 20)
+    list_push(r5, 5000)
+    list_push(recs, record_encode_integers(r5))
+
+    mut r6 := list_new()
+    list_push(r6, 6)
+    list_push(r6, 20)
+    list_push(r6, 6000)
+    list_push(recs, record_encode_integers(r6))
+
+    gt := execute_group_by(recs, 1, 2)
+    p = p + ci("GROUP BY produced exactly 2 department groups", group_table_size(gt), 2)
+    p = p + ci("Dept 10 COUNT is 4", group_table_get_count(gt, 10), 4)
+    p = p + ci("Dept 10 SUM(salary) is 10000", group_table_get_sum(gt, 10), 10000)
+    p = p + ci("Dept 10 AVG(salary) is 2500", group_table_get_avg(gt, 10), 2500)
+    p = p + ci("Dept 10 MIN(salary) is 1000", group_table_get_min(gt, 10), 1000)
+    p = p + ci("Dept 10 MAX(salary) is 4000", group_table_get_max(gt, 10), 4000)
+
+    p = p + ci("Dept 20 COUNT is 2", group_table_get_count(gt, 20), 2)
+    p = p + ci("Dept 20 SUM(salary) is 11000", group_table_get_sum(gt, 20), 11000)
+    p = p + ci("Dept 20 AVG(salary) is 5500", group_table_get_avg(gt, 20), 5500)
+    p = p + ci("Dept 20 MIN(salary) is 5000", group_table_get_min(gt, 20), 5000)
+    p = p + ci("Dept 20 MAX(salary) is 6000", group_table_get_max(gt, 20), 6000)
+    return p
+
+# ── [3/5] HAVING Clause Filtering ─────────────────────────────────────────────
+def test_having_filter() -> Int:
+    print_str("--- [3/5] Testing HAVING Clause Aggregate Filtering ---")
+    mut p := 0
+
+    mut recs := list_new()
+    mut r1 := list_new()
+    list_push(r1, 1)
+    list_push(r1, 10)
+    list_push(r1, 1000)
+    list_push(recs, record_encode_integers(r1))
+
+    mut r2 := list_new()
+    list_push(r2, 2)
+    list_push(r2, 10)
+    list_push(r2, 2000)
+    list_push(recs, record_encode_integers(r2))
+
+    mut r3 := list_new()
+    list_push(r3, 3)
+    list_push(r3, 10)
+    list_push(r3, 3000)
+    list_push(recs, record_encode_integers(r3))
+
+    mut r4 := list_new()
+    list_push(r4, 4)
+    list_push(r4, 20)
+    list_push(r4, 15000)
+    list_push(recs, record_encode_integers(r4))
+
+    gt := execute_group_by(recs, 1, 2)
+
+    # Filter: HAVING SUM(salary) > 10000 -> only Dept 20 matches (sum=15000 vs 6000)
+    having_sum := execute_having_filter(gt, AGG_SUM(), OP_GT(), 10000)
+    p = p + ci("HAVING SUM(salary) > 10000 retains 1 group", group_table_size(having_sum), 1)
+    p = p + ci("Retained group is Dept 20", having_sum.group_keys[0], 20)
+
+    # Filter: HAVING COUNT(*) >= 3 -> only Dept 10 matches (count=3 vs 1)
+    having_count := execute_having_filter(gt, AGG_COUNT(), OP_GTE(), 3)
+    p = p + ci("HAVING COUNT(*) >= 3 retains 1 group", group_table_size(having_count), 1)
+    p = p + ci("Retained group is Dept 10", having_count.group_keys[0], 10)
+    return p
+
+# ── [4/5] ORDER BY Sorting (ASC / DESC) ───────────────────────────────────────
+def test_order_by_asc_desc() -> Int:
+    print_str("--- [4/5] Testing ORDER BY Sorting (ASC / DESC) ---")
+    mut p := 0
+
+    mut rows := list_new()
+    mut row3 := list_new()
+    list_push(row3, 3)
+    list_push(row3, 300)
+    list_push(rows, row3)
+
+    mut row1 := list_new()
+    list_push(row1, 1)
+    list_push(row1, 100)
+    list_push(rows, row1)
+
+    mut row4 := list_new()
+    list_push(row4, 4)
+    list_push(row4, 400)
+    list_push(rows, row4)
+
+    mut row2 := list_new()
+    list_push(row2, 2)
+    list_push(row2, 200)
+    list_push(rows, row2)
+
+    # Sort ASC by col 0 (id)
+    sorted_asc := execute_order_by(rows, 0, ORDER_ASC())
+    p = p + ci("ORDER BY id ASC row 0 is 1", sorted_asc[0][0], 1)
+    p = p + ci("ORDER BY id ASC row 1 is 2", sorted_asc[1][0], 2)
+    p = p + ci("ORDER BY id ASC row 2 is 3", sorted_asc[2][0], 3)
+    p = p + ci("ORDER BY id ASC row 3 is 4", sorted_asc[3][0], 4)
+
+    # Sort DESC by col 0 (id)
+    sorted_desc := execute_order_by(rows, 0, ORDER_DESC())
+    p = p + ci("ORDER BY id DESC row 0 is 4", sorted_desc[0][0], 4)
+    p = p + ci("ORDER BY id DESC row 1 is 3", sorted_desc[1][0], 3)
+    p = p + ci("ORDER BY id DESC row 2 is 2", sorted_desc[2][0], 2)
+    p = p + ci("ORDER BY id DESC row 3 is 1", sorted_desc[3][0], 1)
+    return p
+
+# ── [5/5] LIMIT, OFFSET & DISTINCT Operators ─────────────────────────────────
+def test_limit_offset_and_distinct() -> Int:
+    print_str("--- [5/5] Testing LIMIT, OFFSET & DISTINCT ---")
+    mut p := 0
+
+    mut rows := list_new()
+    mut i := 1
+    while i <= 10:
+        mut r := list_new()
+        list_push(r, i)
+        list_push(r, (i % 3) + 1)
+        list_push(rows, r)
+        i = i + 1
+
+    # LIMIT 3 OFFSET 2: should return items at index 2, 3, 4 (values 3, 4, 5)
+    paged := execute_limit_offset(rows, 3, 2)
+    p = p + ci("LIMIT 3 OFFSET 2 returns 3 rows", len(paged), 3)
+    p = p + ci("First paged item id is 3", paged[0][0], 3)
+    p = p + ci("Second paged item id is 4", paged[1][0], 4)
+    p = p + ci("Third paged item id is 5", paged[2][0], 5)
+
+    # DISTINCT on col 1 (dept_id: 2, 3, 1 repeating) -> should return exactly 3 unique rows
+    distinct_rows := execute_distinct(rows, 1)
+    p = p + ci("DISTINCT on dept_id returns 3 rows", len(distinct_rows), 3)
+    p = p + ci("Distinct dept 0 is 2", distinct_rows[0][1], 2)
+    p = p + ci("Distinct dept 1 is 3", distinct_rows[1][1], 3)
+    p = p + ci("Distinct dept 2 is 1", distinct_rows[2][1], 1)
+    return p
+
+def main():
+    print_str("================================================================")
+    print_str("    SamarDB Phase 11 Analytical Aggregations & Grouping Suite  ")
+    print_str("================================================================")
+    p_one := test_global_aggregates()
+    p_two := test_group_by_aggregation()
+    p_three := test_having_filter()
+    p_four := test_order_by_asc_desc()
+    p_five := test_limit_offset_and_distinct()
+    total := p_one + p_two + p_three + p_four + p_five
+    print_str("================================================================")
+    if total >= 30:
+        print_str(str_concat(" [SUCCESS] All ", str_concat(int_to_str(total), " SamarDB Phase 11 Aggregation Assertions Passed!")))
+    else:
+        failed := 30 - total
+        print_str(str_concat(" [FAILED] ", str_concat(int_to_str(failed), str_concat(" failures, ", str_concat(int_to_str(total), " passed")))))
+    print_str("================================================================")

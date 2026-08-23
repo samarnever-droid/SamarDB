@@ -1,0 +1,353 @@
+# samardb-concur: Concurrency Control & Serializable Snapshot Isolation (SSI)
+# Implements 2PL LockTable with Deadlock Detection and Cahill's SSI Algorithm.
+
+import bytes
+
+# ── Lock Mode Constants ───────────────────────────────────────────────────────
+def LOCK_NONE() -> Int:
+    return 0
+
+def LOCK_SHARED() -> Int:
+    return 1
+
+def LOCK_EXCLUSIVE() -> Int:
+    return 2
+
+def LOCK_SIREAD() -> Int:
+    return 3
+
+# ── Lock Acquisition Status Constants ─────────────────────────────────────────
+def LOCK_STATUS_GRANTED() -> Int:
+    return 0
+
+def LOCK_STATUS_BLOCKED() -> Int:
+    return 1
+
+def LOCK_STATUS_DEADLOCK() -> Int:
+    return 2
+
+# ── Lock Table Structure ──────────────────────────────────────────────────────
+# Tracks holders and waiters per (page_id, slot_id) resource.
+struct LockTable:
+    # Held locks (parallel lists)
+    holder_xids:   List[Int]
+    holder_modes:  List[Int]
+    holder_pages:  List[Int]
+    holder_slots:  List[Int]
+    # Waiting locks (parallel lists)
+    waiter_xids:   List[Int]
+    waiter_modes:  List[Int]
+    waiter_pages:  List[Int]
+    waiter_slots:  List[Int]
+
+def lock_table_new() -> LockTable:
+    return LockTable(
+        list_new(), list_new(), list_new(), list_new(),
+        list_new(), list_new(), list_new(), list_new()
+    )
+
+# Lock compatibility check
+def lock_modes_compatible(held_mode: Int, req_mode: Int) -> Bool:
+    if held_mode == LOCK_NONE() || req_mode == LOCK_NONE():
+        return true
+    if held_mode == LOCK_SIREAD() || req_mode == LOCK_SIREAD():
+        return true
+    if held_mode == LOCK_SHARED() && req_mode == LOCK_SHARED():
+        return true
+    return false
+
+# Check if a transaction already holds a compatible or stronger lock
+def lock_is_held(lt: LockTable, xid: Int, page_id: Int, slot_id: Int, mode: Int) -> Bool:
+    n := len(lt.holder_xids)
+    mut i := 0
+    while i < n:
+        if lt.holder_xids[i] == xid && lt.holder_pages[i] == page_id && lt.holder_slots[i] == slot_id:
+            if lt.holder_modes[i] == mode || lt.holder_modes[i] == LOCK_EXCLUSIVE():
+                return true
+        i = i + 1
+    return false
+
+# Check if a transaction is currently waiting
+def lock_is_waiting(lt: LockTable, xid: Int, page_id: Int, slot_id: Int) -> Bool:
+    n := len(lt.waiter_xids)
+    mut i := 0
+    while i < n:
+        if lt.waiter_xids[i] == xid && lt.waiter_pages[i] == page_id && lt.waiter_slots[i] == slot_id:
+            return true
+        i = i + 1
+    return false
+
+# Deadlock detection: check if adding edge (waiter_xid -> holder_xid) creates a cycle
+def check_deadlock_cycle(lt: LockTable, waiter_xid: Int, target_holder_xid: Int) -> Bool:
+    if waiter_xid == target_holder_xid:
+        return true
+    # Check if target_holder_xid is itself waiting for waiter_xid (direct or indirect)
+    n_waiters := len(lt.waiter_xids)
+    n_holders := len(lt.holder_xids)
+    mut i := 0
+    while i < n_waiters:
+        if lt.waiter_xids[i] == target_holder_xid:
+            w_page := lt.waiter_pages[i]
+            w_slot := lt.waiter_slots[i]
+            # Find who holds the resource target_holder_xid is waiting for
+            mut j := 0
+            while j < n_holders:
+                if lt.holder_pages[j] == w_page && lt.holder_slots[j] == w_slot:
+                    h_xid := lt.holder_xids[j]
+                    if h_xid == waiter_xid:
+                        return true
+                j = j + 1
+        i = i + 1
+    return false
+
+# Acquire a lock on (page_id, slot_id)
+def lock_acquire(lt: LockTable, xid: Int, page_id: Int, slot_id: Int, mode: Int) -> Tuple[LockTable, Int]:
+    # SIREAD locks never conflict and are immediately granted
+    if mode == LOCK_SIREAD():
+        mut hx := list_new()
+        mut hm := list_new()
+        mut hp := list_new()
+        mut hs := list_new()
+        mut i := 0
+        n := len(lt.holder_xids)
+        while i < n:
+            list_push(hx, lt.holder_xids[i])
+            list_push(hm, lt.holder_modes[i])
+            list_push(hp, lt.holder_pages[i])
+            list_push(hs, lt.holder_slots[i])
+            i = i + 1
+        list_push(hx, xid)
+        list_push(hm, mode)
+        list_push(hp, page_id)
+        list_push(hs, slot_id)
+        new_lt := LockTable(hx, hm, hp, hs, lt.waiter_xids, lt.waiter_modes, lt.waiter_pages, lt.waiter_slots)
+        return (new_lt, LOCK_STATUS_GRANTED())
+
+    # Check for conflicts with existing holders
+    n_holders := len(lt.holder_xids)
+    mut conflict := false
+    mut conflicting_holder_xid := 0
+    mut k := 0
+    while k < n_holders:
+        if lt.holder_pages[k] == page_id && lt.holder_slots[k] == slot_id:
+            if lt.holder_xids[k] != xid:
+                if !lock_modes_compatible(lt.holder_modes[k], mode):
+                    conflict = true
+                    conflicting_holder_xid = lt.holder_xids[k]
+        k = k + 1
+
+    if !conflict:
+        # Grant immediately
+        mut hx2 := list_new()
+        mut hm2 := list_new()
+        mut hp2 := list_new()
+        mut hs2 := list_new()
+        mut idx := 0
+        while idx < n_holders:
+            list_push(hx2, lt.holder_xids[idx])
+            list_push(hm2, lt.holder_modes[idx])
+            list_push(hp2, lt.holder_pages[idx])
+            list_push(hs2, lt.holder_slots[idx])
+            idx = idx + 1
+        list_push(hx2, xid)
+        list_push(hm2, mode)
+        list_push(hp2, page_id)
+        list_push(hs2, slot_id)
+        granted_lt := LockTable(hx2, hm2, hp2, hs2, lt.waiter_xids, lt.waiter_modes, lt.waiter_pages, lt.waiter_slots)
+        return (granted_lt, LOCK_STATUS_GRANTED())
+
+    # Check for deadlock cycle
+    if check_deadlock_cycle(lt, xid, conflicting_holder_xid):
+        return (lt, LOCK_STATUS_DEADLOCK())
+
+    # Add to waiter list
+    mut wx := list_new()
+    mut wm := list_new()
+    mut wp := list_new()
+    mut ws := list_new()
+    mut w_idx := 0
+    n_waiters := len(lt.waiter_xids)
+    while w_idx < n_waiters:
+        list_push(wx, lt.waiter_xids[w_idx])
+        list_push(wm, lt.waiter_modes[w_idx])
+        list_push(wp, lt.waiter_pages[w_idx])
+        list_push(ws, lt.waiter_slots[w_idx])
+        w_idx = w_idx + 1
+    list_push(wx, xid)
+    list_push(wm, mode)
+    list_push(wp, page_id)
+    list_push(ws, slot_id)
+    blocked_lt := LockTable(lt.holder_xids, lt.holder_modes, lt.holder_pages, lt.holder_slots, wx, wm, wp, ws)
+    return (blocked_lt, LOCK_STATUS_BLOCKED())
+
+# Release all locks held by a transaction and promote compatible waiters
+def lock_release_all(lt: LockTable, xid: Int) -> LockTable:
+    # 1. Filter out all holders belonging to xid
+    mut hx := list_new()
+    mut hm := list_new()
+    mut hp := list_new()
+    mut hs := list_new()
+    n_holders := len(lt.holder_xids)
+    mut i := 0
+    while i < n_holders:
+        if lt.holder_xids[i] != xid:
+            list_push(hx, lt.holder_xids[i])
+            list_push(hm, lt.holder_modes[i])
+            list_push(hp, lt.holder_pages[i])
+            list_push(hs, lt.holder_slots[i])
+        i = i + 1
+
+    # 2. Promote waiters if now compatible
+    mut remaining_wx := list_new()
+    mut remaining_wm := list_new()
+    mut remaining_wp := list_new()
+    mut remaining_ws := list_new()
+    n_waiters := len(lt.waiter_xids)
+    mut j := 0
+    while j < n_waiters:
+        w_xid := lt.waiter_xids[j]
+        if w_xid == xid:
+            # Drop waiter entry for the releasing xid itself
+            j = j + 1
+        else:
+            w_mode := lt.waiter_modes[j]
+            w_page := lt.waiter_pages[j]
+            w_slot := lt.waiter_slots[j]
+            # Check compatibility against current holders
+            mut can_grant := true
+            mut cur_h := 0
+            n_cur := len(hx)
+            while cur_h < n_cur:
+                if hp[cur_h] == w_page && hs[cur_h] == w_slot:
+                    if !lock_modes_compatible(hm[cur_h], w_mode):
+                        can_grant = false
+                cur_h = cur_h + 1
+
+            if can_grant:
+                # Promote to holder
+                list_push(hx, w_xid)
+                list_push(hm, w_mode)
+                list_push(hp, w_page)
+                list_push(hs, w_slot)
+            else:
+                # Keep waiting
+                list_push(remaining_wx, w_xid)
+                list_push(remaining_wm, w_mode)
+                list_push(remaining_wp, w_page)
+                list_push(remaining_ws, w_slot)
+            j = j + 1
+
+    return LockTable(hx, hm, hp, hs, remaining_wx, remaining_wm, remaining_wp, remaining_ws)
+
+# ── Serializable Snapshot Isolation (SSI) Engine ─────────────────────────────
+# Tracks SIREAD locks and rw-antidependencies (T1 --rw--> T2).
+struct SSIGraph:
+    # Registered SIREAD locks
+    siread_xids:   List[Int]
+    siread_pages:  List[Int]
+    siread_slots:  List[Int]
+    # Dependency edges (from_xid --rw--> to_xid)
+    edge_from:     List[Int]
+    edge_to:       List[Int]
+    edge_pages:    List[Int]
+    edge_slots:    List[Int]
+
+def ssi_graph_new() -> SSIGraph:
+    return SSIGraph(
+        list_new(), list_new(), list_new(),
+        list_new(), list_new(), list_new(), list_new()
+    )
+
+# Register an SIREAD lock on (page_id, slot_id)
+def ssi_register_read(graph: SSIGraph, xid: Int, page_id: Int, slot_id: Int) -> SSIGraph:
+    mut rx := list_new()
+    mut rp := list_new()
+    mut rs := list_new()
+    mut i := 0
+    n := len(graph.siread_xids)
+    while i < n:
+        list_push(rx, graph.siread_xids[i])
+        list_push(rp, graph.siread_pages[i])
+        list_push(rs, graph.siread_slots[i])
+        i = i + 1
+    list_push(rx, xid)
+    list_push(rp, page_id)
+    list_push(rs, slot_id)
+    return SSIGraph(rx, rp, rs, graph.edge_from, graph.edge_to, graph.edge_pages, graph.edge_slots)
+
+# Check if an edge already exists
+def ssi_has_edge(graph: SSIGraph, from_x: Int, to_x: Int) -> Bool:
+    n := len(graph.edge_from)
+    mut i := 0
+    while i < n:
+        if graph.edge_from[i] == from_x && graph.edge_to[i] == to_x:
+            return true
+        i = i + 1
+    return false
+
+# Check for Dangerous Structure (T_in --rw--> T_mid --rw--> T_out or cycle)
+def ssi_check_dangerous_structure(graph: SSIGraph, writer_xid: Int) -> Bool:
+    n := len(graph.edge_from)
+    # Check 1: Direct 2-cycle (T1 --rw--> T2 and T2 --rw--> T1)
+    mut i := 0
+    while i < n:
+        if graph.edge_to[i] == writer_xid:
+            in_xid := graph.edge_from[i]
+            # Check if writer_xid already has outgoing edge to in_xid
+            mut j := 0
+            while j < n:
+                if graph.edge_from[j] == writer_xid && graph.edge_to[j] == in_xid:
+                    return true
+                j = j + 1
+        i = i + 1
+
+    # Check 2: Pivot structure (T_in --rw--> writer_xid --rw--> T_out)
+    mut has_in := false
+    mut has_out := false
+    mut k := 0
+    while k < n:
+        if graph.edge_to[k] == writer_xid:
+            has_in = true
+        if graph.edge_from[k] == writer_xid:
+            has_out = true
+        k = k + 1
+    if has_in && has_out:
+        return true
+
+    return false
+
+# Register a write on (page_id, slot_id), check SIREAD conflicts, add edges, detect anomalies
+def ssi_register_write(graph: SSIGraph, writer_xid: Int, page_id: Int, slot_id: Int) -> Tuple[SSIGraph, Bool]:
+    mut ef := list_new()
+    mut et := list_new()
+    mut ep := list_new()
+    mut es := list_new()
+    mut i := 0
+    n_edges := len(graph.edge_from)
+    while i < n_edges:
+        list_push(ef, graph.edge_from[i])
+        list_push(et, graph.edge_to[i])
+        list_push(ep, graph.edge_pages[i])
+        list_push(es, graph.edge_slots[i])
+        i = i + 1
+
+    # Scan for SIREAD locks on the modified tuple by other transactions
+    n_reads := len(graph.siread_xids)
+    mut j := 0
+    while j < n_reads:
+        if graph.siread_pages[j] == page_id && graph.siread_slots[j] == slot_id:
+            reader_xid := graph.siread_xids[j]
+            if reader_xid != writer_xid:
+                # Add rw-antidependency edge reader_xid --rw--> writer_xid
+                if !ssi_has_edge(graph, reader_xid, writer_xid):
+                    list_push(ef, reader_xid)
+                    list_push(et, writer_xid)
+                    list_push(ep, page_id)
+                    list_push(es, slot_id)
+        j = j + 1
+
+    upd_graph := SSIGraph(graph.siread_xids, graph.siread_pages, graph.siread_slots, ef, et, ep, es)
+
+    # Check if a dangerous structure / anomaly cycle exists
+    anomaly := ssi_check_dangerous_structure(upd_graph, writer_xid)
+    return (upd_graph, anomaly)

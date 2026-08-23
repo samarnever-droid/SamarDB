@@ -1,0 +1,17 @@
+# Compiled binaries and debug symbols
+*.exe
+!bin/*.exe
+*.ilk
+*.pdb
+*.obj
+*.o
+*.ll
+
+# Local test artifacts & databases
+artifacts/
+test_db_*/
+*.aof
+*.wal
+*.sst
+LppData/
+.lpp/

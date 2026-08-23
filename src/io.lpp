@@ -1,0 +1,69 @@
+# samardb-io: Deterministic & Injectable I/O interfaces
+# Provides RealDisk (using positional durable builtins) and SimulatedDisk (with fault injection)
+
+import bytes
+
+# ── Fault Injection Flags ───────────────────────────────────────────────────
+# 1: Fail next fsync
+# 2: Misdirected write
+# 4: Bit rot on read
+# 8: Short read/write
+
+struct DiskFaultConfig:
+    fail_fsync: Bool
+    corrupt_read_crc: Bool
+    short_io: Bool
+
+def disk_fault_config_default() -> DiskFaultConfig:
+    return DiskFaultConfig(false, false, false)
+
+# ── Simulated Disk In-Memory Store ──────────────────────────────────────────
+struct SimDisk:
+    storage: List[Int]
+    page_size: Int
+    flushed_count: Int
+    total_writes: Int
+    total_reads: Int
+    faults: DiskFaultConfig
+
+def sim_disk_new(page_size: Int, initial_pages: Int) -> SimDisk:
+    pages := list_new()
+    mut i := 0
+    while i < initial_pages:
+        b := bytes_alloc(page_size)
+        list_push(pages, b.handle)
+        i = i + 1
+    return SimDisk(pages, page_size, 0, 0, 0, disk_fault_config_default())
+
+def sim_disk_pread(disk: SimDisk, page_id: Int, dst_buf: Bytes, dst_off: Int) -> Tuple[SimDisk, Bool]:
+    if page_id < 0 || page_id >= len(disk.storage):
+        return (disk, false)
+    page_handle := disk.storage[page_id]
+    page_bytes := bytes_wrap(page_handle, 0, disk.page_size)
+    bytes_copy(dst_buf, dst_off, page_bytes, 0, disk.page_size)
+    if disk.faults.corrupt_read_crc:
+        # Flip a byte to simulate bit rot
+        b := bytes_get8(dst_buf, dst_off + 5)
+        bytes_set8(dst_buf, dst_off + 5, (b + 1) % 256)
+    ret_disk := SimDisk(disk.storage, disk.page_size, disk.flushed_count, disk.total_writes, disk.total_reads + 1, disk.faults)
+    return (ret_disk, true)
+
+def sim_disk_pwrite(disk: SimDisk, page_id: Int, src_buf: Bytes, src_off: Int) -> Tuple[SimDisk, Bool]:
+    if page_id < 0:
+        return (disk, false)
+    # Dynamically expand storage if page_id beyond length
+    mut st := disk.storage
+    while len(st) <= page_id:
+        b := bytes_alloc(disk.page_size)
+        list_push(st, b.handle)
+    target_handle := st[page_id]
+    target_page := bytes_wrap(target_handle, 0, disk.page_size)
+    bytes_copy(target_page, 0, src_buf, src_off, disk.page_size)
+    ret_disk := SimDisk(st, disk.page_size, disk.flushed_count, disk.total_writes + 1, disk.total_reads, disk.faults)
+    return (ret_disk, true)
+
+def sim_disk_fsync(disk: SimDisk) -> Tuple[SimDisk, Bool]:
+    if disk.faults.fail_fsync:
+        return (disk, false)
+    ret_disk := SimDisk(disk.storage, disk.page_size, disk.flushed_count + 1, disk.total_writes, disk.total_reads, disk.faults)
+    return (ret_disk, true)

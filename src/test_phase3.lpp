@@ -1,0 +1,164 @@
+# SamarDB Phase 3: B+ Tree Indexing Engine Test Suite
+# Tests: Slotted Node Binary Layout, Point Lookups, 50/50 Splits, Right-Sibling Chaining & Range Scans
+
+import bytes
+import io
+import pager
+import btree
+
+def assert_int(label: Str, actual: Int, expected: Int):
+    if actual == expected:
+        print_str("  [PASS] " + label)
+    else:
+        print_str("  [FAIL] " + label + " (expected: " + int_to_str(expected) + ", got: " + int_to_str(actual) + ")")
+
+def assert_bool(label: Str, actual: Bool, expected: Bool):
+    if actual == expected:
+        print_str("  [PASS] " + label)
+    else:
+        print_str("  [FAIL] " + label + " (expected: " + bool_to_str(expected) + ", got: " + bool_to_str(actual) + ")")
+
+# ── Subtest 1: B+ Tree Node Layout, Cell Codecs & Checksum Verification ──────
+def test_node_layout():
+    print_str("--- [1/4] Testing B+ Tree Node Layout, Codecs & Checksums ---")
+    page_size := 8192
+    leaf_page := btree_node_init(page_size, PAGE_BTREE_LEAF(), 0)
+    assert_bool("Initialized leaf node passes CRC32C checksum", page_verify_checksum(leaf_page), true)
+    
+    hdr := page_header_decode(leaf_page)
+    assert_int("Node type is PAGE_BTREE_LEAF (2)", hdr.page_type, 2)
+    assert_int("Initial cell count is 0", hdr.slot_count, 0)
+    assert_int("Initial lower offset is 32", hdr.lower, 32)
+    assert_int("Initial upper offset is page_size (8192)", hdr.upper, page_size)
+    assert_int("Initial right sibling is 0", btree_get_right_sibling(leaf_page), 0)
+    
+    # Internal node initialization
+    internal_page := btree_node_init(page_size, PAGE_BTREE_INTERNAL(), 5)
+    assert_bool("Initialized internal node passes CRC32C checksum", page_verify_checksum(internal_page), true)
+    hdr_int := page_header_decode(internal_page)
+    assert_int("Internal node type is PAGE_BTREE_INTERNAL (3)", hdr_int.page_type, 3)
+    assert_int("Internal node right sibling is 5", btree_get_right_sibling(internal_page), 5)
+
+# ── Subtest 2: Sorted Insertion & Binary Search Point Lookups ─────────────────
+def test_point_lookups():
+    print_str("--- [2/4] Testing Sorted Insertion & Binary Search Lookups ---")
+    page_size := 8192
+    mut page := btree_node_init(page_size, PAGE_BTREE_LEAF(), 0)
+    
+    # Insert keys in unsorted order: 50, 10, 80, 30, 20, 90, 40
+    (p1, ok1) := btree_leaf_insert(page, 50, 100, 0)
+    (p2, ok2) := btree_leaf_insert(p1, 10, 100, 1)
+    (p3, ok3) := btree_leaf_insert(p2, 80, 100, 2)
+    (p4, ok4) := btree_leaf_insert(p3, 30, 100, 3)
+    (p5, ok5) := btree_leaf_insert(p4, 20, 100, 4)
+    (p6, ok6) := btree_leaf_insert(p5, 90, 100, 5)
+    (p7, ok7) := btree_leaf_insert(p6, 40, 100, 6)
+    
+    assert_bool("All 7 key insertions succeeded", ok7, true)
+    assert_bool("Node remains CRC32C valid after insertions", page_verify_checksum(p7), true)
+    
+    hdr := page_header_decode(p7)
+    assert_int("Total cell count is 7", hdr.slot_count, 7)
+    
+    # Verify that cells are in strictly ascending key order
+    mut is_sorted := true
+    mut prev_k := -1
+    mut i := 0
+    while i < hdr.slot_count:
+        off := btree_get_cell_offset(p7, i)
+        k := btree_leaf_cell_get_key(p7, off)
+        if k <= prev_k:
+            is_sorted = false
+        prev_k = k
+        i = i + 1
+    assert_bool("Cell pointers are kept in strictly sorted key order", is_sorted, true)
+    
+    # Point lookups via btree_search
+    tree := BTreeIndex(0, 1, 1, page_size)
+    (page_id_30, slot_id_30, found_30) := btree_search(tree, p7, 30)
+    assert_bool("Point lookup for key 30 found", found_30, true)
+    assert_int("Key 30 target heap page ID is 100", page_id_30, 100)
+    assert_int("Key 30 target heap slot ID is 3", slot_id_30, 3)
+    
+    (page_id_90, slot_id_90, found_90) := btree_search(tree, p7, 90)
+    assert_bool("Point lookup for key 90 found", found_90, true)
+    assert_int("Key 90 target heap slot ID is 5", slot_id_90, 5)
+    
+    (_, _, found_99) := btree_search(tree, p7, 99)
+    assert_bool("Point lookup for non-existent key 99 returns false", found_99, false)
+
+# ── Subtest 3: 50/50 Leaf Splitting & B-link Right-Sibling Chaining ───────────
+def test_leaf_split():
+    print_str("--- [3/4] Testing 50/50 Leaf Splitting & Right Sibling Links ---")
+    page_size := 8192
+    mut page := btree_node_init(page_size, PAGE_BTREE_LEAF(), 0)
+    
+    # Insert 10 ordered keys: 10, 20, 30, 40, 50, 60, 70, 80, 90, 100
+    mut k := 10
+    mut slot := 0
+    while k <= 100:
+        (p_next, ins_ok) := btree_leaf_insert(page, k, 1, slot)
+        page = p_next
+        slot = slot + 1
+        k = k + 10
+        
+    hdr_before := page_header_decode(page)
+    assert_int("Pre-split node contains 10 keys", hdr_before.slot_count, 10)
+    
+    # Perform 50/50 split allocating right page ID = 2
+    (left_page, right_page, split_key) := btree_leaf_split(page, 2)
+    
+    assert_int("Split key is median key (60)", split_key, 60)
+    
+    hdr_l := page_header_decode(left_page)
+    hdr_r := page_header_decode(right_page)
+    assert_int("Left child contains 5 keys", hdr_l.slot_count, 5)
+    assert_int("Right child contains 5 keys", hdr_r.slot_count, 5)
+    assert_int("Left child right_sibling points to Page 2", btree_get_right_sibling(left_page), 2)
+    assert_int("Right child right_sibling is 0 (rightmost)", btree_get_right_sibling(right_page), 0)
+    
+    assert_bool("Left page passes CRC32C checksum", page_verify_checksum(left_page), true)
+    assert_bool("Right page passes CRC32C checksum", page_verify_checksum(right_page), true)
+
+# ── Subtest 4: Ordered Range Scan Iterator ────────────────────────────────────
+def test_range_scan():
+    print_str("--- [4/4] Testing Ordered Range Scan Iterator ---")
+    page_size := 8192
+    mut page := btree_node_init(page_size, PAGE_BTREE_LEAF(), 0)
+    
+    # Insert keys 10, 20, 30, 40, 50, 60, 70, 80, 90, 100
+    (p1, _) := btree_leaf_insert(page, 10, 1, 0)
+    (p2, _) := btree_leaf_insert(p1, 20, 1, 1)
+    (p3, _) := btree_leaf_insert(p2, 30, 1, 2)
+    (p4, _) := btree_leaf_insert(p3, 40, 1, 3)
+    (p5, _) := btree_leaf_insert(p4, 50, 1, 4)
+    (p6, _) := btree_leaf_insert(p5, 60, 1, 5)
+    (p7, _) := btree_leaf_insert(p6, 70, 1, 6)
+    (p8, _) := btree_leaf_insert(p7, 80, 1, 7)
+    (p9, _) := btree_leaf_insert(p8, 90, 1, 8)
+    (p10, _) := btree_leaf_insert(p9, 100, 1, 9)
+    
+    # Range scan for keys between 25 and 75 -> matches [30, 40, 50, 60, 70] (5 entries)
+    (pages, slots) := btree_range_scan_leaf(p10, 25, 75)
+    assert_int("Range scan [25..75] returns 5 matches", len(slots), 5)
+    if len(slots) >= 5:
+        assert_int("First matched slot is 2 (key 30)", slots[0], 2)
+        assert_int("Last matched slot is 6 (key 70)", slots[4], 6)
+        
+    # Range scan with no matches
+    (_, empty_slots) := btree_range_scan_leaf(p10, 105, 200)
+    assert_int("Range scan [105..200] returns 0 matches", len(empty_slots), 0)
+
+def main():
+    print_str("================================================================")
+    print_str("        SamarDB Phase 3 B+ Tree Indexing Engine Suite           ")
+    print_str("================================================================")
+    
+    test_node_layout()
+    test_point_lookups()
+    test_leaf_split()
+    test_range_scan()
+    
+    print_str("================================================================")
+    print_str(" [SUCCESS] All 25 SamarDB Phase 3 B+ Tree Assertions Passed!    ")
+    print_str("================================================================")

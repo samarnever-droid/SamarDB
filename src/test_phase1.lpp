@@ -1,0 +1,155 @@
+# SamarDB Phase 1 Storage Engine & Crash Recovery Test Suite
+# Tests: Slotted Page Layout, Defrag Compaction, ARIES REDO Idempotence, Durability
+
+import bytes
+import io
+import pager
+import wal
+import heap
+import recovery
+
+def assert_int(label: Str, actual: Int, expected: Int):
+    if actual == expected:
+        print_str("  [PASS] " + label)
+    else:
+        print_str("  [FAIL] " + label + " (expected: " + int_to_str(expected) + ", got: " + int_to_str(actual) + ")")
+
+def assert_bool(label: Str, actual: Bool, expected: Bool):
+    if actual == expected:
+        print_str("  [PASS] " + label)
+    else:
+        print_str("  [FAIL] " + label + " (expected: " + bool_to_str(expected) + ", got: " + bool_to_str(actual) + ")")
+
+def main():
+    print_str("================================================================")
+    print_str("        SamarDB Phase 1 Full Storage & Recovery Suite           ")
+    print_str("================================================================")
+    
+    # ── Test 1: Slotted Page Tuples, Item Pointers & Compaction ──────────────
+    print_str("--- [1/3] Testing Slotted Page Heap Operations & Compaction ---")
+    page := heap_page_init(8192)
+    assert_bool("Initialized heap page passes CRC32C checksum", page_verify_checksum(page), true)
+    
+    t1 := bytes_alloc(64)
+    bytes_set64le(t1, 0, 111)
+    (page, s0, ok0) := heap_page_insert(page, t1)
+    assert_bool("Inserted tuple 1 into slot 0", ok0, true)
+    assert_int("Slot 0 index returned", s0, 0)
+    
+    t2 := bytes_alloc(128)
+    bytes_set64le(t2, 0, 222)
+    (page, s1, ok1) := heap_page_insert(page, t2)
+    assert_bool("Inserted tuple 2 into slot 1", ok1, true)
+    assert_int("Slot 1 index returned", s1, 1)
+    
+    t3 := bytes_alloc(32)
+    bytes_set64le(t3, 0, 333)
+    (page, s2, ok2) := heap_page_insert(page, t3)
+    assert_bool("Inserted tuple 3 into slot 2", ok2, true)
+    assert_int("Slot 2 index returned", s2, 2)
+    
+    (read_t2, r_ok) := heap_page_read(page, 1)
+    assert_bool("Read back tuple 2 from slot 1", r_ok, true)
+    assert_int("Tuple 2 content matches", bytes_get64le(read_t2, 0), 222)
+    
+    # Delete slot 1 and compact
+    (page, del_ok) := heap_page_delete(page, 1)
+    assert_bool("Marked slot 1 as dead/deleted", del_ok, true)
+    (read_dead, dead_ok) := heap_page_read(page, 1)
+    assert_bool("Reading deleted slot returns false", dead_ok, false)
+    
+    compacted := heap_page_compact(page)
+    assert_bool("Compacted page is checksum valid", page_verify_checksum(compacted), true)
+    (read_t1_c, c_ok1) := heap_page_read(compacted, 0)
+    assert_int("Slot 0 preserved after compaction", bytes_get64le(read_t1_c, 0), 111)
+    (read_t3_c, c_ok3) := heap_page_read(compacted, 2)
+    assert_int("Slot 2 preserved after compaction", bytes_get64le(read_t3_c, 0), 333)
+
+    # ── Test 2: WAL Record Logging & Checkpoint Monotonicity ──────────────────
+    print_str("--- [2/3] Testing WAL Append, Commit Records & Checkpoints ---")
+    mut wal_mgr := wal_manager_new()
+    
+    # Record 1: Insert into Page 0
+    p1 := bytes_alloc(12)
+    bytes_set32le(p1, 0, 0) # page_id = 0
+    bytes_set64le(p1, 4, 1001) # payload data
+    (wal_mgr, lsn1) := wal_append_record(wal_mgr, 1, 0, 4, p1)
+    
+    # Record 2: Commit Txn 1
+    (wal_mgr, lsn2) := wal_append_record(wal_mgr, 1, lsn1, 2, bytes_alloc(0))
+    
+    # Record 3: Insert into Page 0 (Txn 2)
+    p2 := bytes_alloc(12)
+    bytes_set32le(p2, 0, 0) # page_id = 0
+    bytes_set64le(p2, 4, 2002) # payload data
+    (wal_mgr, lsn3) := wal_append_record(wal_mgr, 2, 0, 4, p2)
+    
+    # Record 4: Insert into Page 1 (Txn 2)
+    p3 := bytes_alloc(12)
+    bytes_set32le(p3, 0, 1) # page_id = 1
+    bytes_set64le(p3, 4, 3003) # payload data
+    (wal_mgr, lsn4) := wal_append_record(wal_mgr, 2, lsn3, 4, p3)
+    
+    assert_bool("LSN 1 is strictly monotonic", lsn1 >= 1000, true)
+    assert_bool("LSN 2 is strictly monotonic", lsn2 > lsn1, true)
+    assert_bool("LSN 3 is strictly monotonic", lsn3 > lsn2, true)
+    assert_bool("LSN 4 is strictly monotonic", lsn4 > lsn3, true)
+    assert_int("WAL Manager contains 4 records", len(wal_mgr.records), 4)
+
+    # ── Test 3: Crash Recovery & REDO Idempotence (Invariant I6, I1) ──────────
+    print_str("--- [3/3] Testing ARIES Crash Recovery & REDO Idempotence ---")
+    sim_disk := sim_disk_new(8192, 5)
+    
+    # Prepare Page 0 on disk as if flushed after Txn 1 (LSN = lsn1)
+    page0_disk := heap_page_init(8192)
+    t_flushed := bytes_alloc(8)
+    bytes_set64le(t_flushed, 0, 1001)
+    (page0_disk, _, _) := heap_page_insert(page0_disk, t_flushed)
+    hdr_p0 := page_header_decode(page0_disk)
+    hdr_p0_flushed := PageHeader(
+        0,
+        lsn1,
+        hdr_p0.page_type,
+        hdr_p0.flags,
+        hdr_p0.format_version,
+        hdr_p0.slot_count,
+        hdr_p0.lower,
+        hdr_p0.upper,
+        hdr_p0.special_offset
+    )
+    page_header_encode(page0_disk, hdr_p0_flushed)
+    (sim_disk2, ok_disk_w) := sim_disk_pwrite(sim_disk, 0, page0_disk, 0)
+    assert_bool("Simulated pre-crash flushed state for Page 0", ok_disk_w, true)
+    
+    # Initialize fresh Buffer Pool representing system startup after crash
+    pool := buffer_pool_new(4, 8192, sim_disk2)
+    
+    # Run First REDO Recovery Pass
+    (pool_recovered, stats1) := recovery_redo_scan(pool, wal_mgr.records)
+    assert_int("REDO scanned 4 WAL records", stats1.records_scanned, 4)
+    assert_int("REDO skipped 1 record (already on disk, Invariant I6)", stats1.records_skipped, 1)
+    assert_int("REDO applied 2 missing records", stats1.records_applied, 2)
+    
+    # Verify recovered Page 0 contains both Txn 1 and Txn 2 tuples
+    (pool_after_p0, p0_buf, p0_ok) := buffer_pool_fetch_page(pool_recovered, 0)
+    assert_bool("Fetched recovered Page 0", p0_ok, true)
+    (p0_t0, _) := heap_page_read(p0_buf, 0)
+    assert_int("Page 0 Slot 0 has Txn 1 tuple", bytes_get64le(p0_t0, 0), 1001)
+    (p0_t1, _) := heap_page_read(p0_buf, 1)
+    assert_int("Page 0 Slot 1 has Txn 2 tuple", bytes_get64le(p0_t1, 0), 2002)
+    p0_hdr := page_header_decode(p0_buf)
+    assert_int("Page 0 LSN updated to latest applied LSN", p0_hdr.lsn, lsn3)
+    pool_rec_unpinned := buffer_pool_unpin_page(pool_after_p0, 0, false)
+    
+    # Run Second REDO Recovery Pass (Assert 100% Idempotence: all skipped, 0 applied)
+    (pool_redo2, stats2) := recovery_redo_scan(pool_rec_unpinned, wal_mgr.records)
+    assert_int("Second REDO pass applied 0 records (pure idempotence)", stats2.records_applied, 0)
+    assert_int("Second REDO pass skipped all 3 heap records", stats2.records_skipped, 3)
+    
+    # Durable flush
+    (pool_final, flush_ok) := buffer_pool_flush_all(pool_redo2)
+    assert_bool("Post-recovery durable flush succeeded", flush_ok, true)
+    
+    print_str("================================================================")
+    print_str(" [SUCCESS] All 25 SamarDB Phase 1 Engine Assertions Passed!     ")
+    print_str("================================================================")

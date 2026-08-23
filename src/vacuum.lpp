@@ -1,0 +1,104 @@
+# samardb-vacuum: MVCC Heap Page Operations and VACUUM Engine
+# Implements non-blocking concurrent reads, MVCC updates/deletes, and dead space reclamation
+
+import bytes
+import pager
+import heap
+import tx
+import mvcc
+
+# Insert an MVCC-wrapped tuple into a heap page
+def heap_mvcc_insert(page: Bytes, user_payload: Bytes, txn_id: Int, cid: Int) -> Tuple[Bytes, Int, Bool]:
+    mvcc_raw := tuple_create_mvcc(user_payload, txn_id, cid)
+    return heap_page_insert(page, mvcc_raw)
+
+# Delete an MVCC tuple: sets xmax = txn_id without deleting data in-place
+def heap_mvcc_delete(page: Bytes, slot_id: Int, txn_id: Int, cid: Int) -> Tuple[Bytes, Bool]:
+    hdr := page_header_decode(page)
+    if slot_id < 0 || slot_id >= hdr.slot_count:
+        return (page, false)
+        
+    ptr := item_pointer_decode(page, slot_id)
+    if ptr.offset == 0 || ptr.length < 24:
+        return (page, false)
+        
+    # Read existing header, update xmax
+    thdr := tuple_header_decode(page, ptr.offset)
+    new_thdr := TupleHeader(thdr.xmin, txn_id, cid, thdr.infomask, thdr.payload_len)
+    tuple_header_encode(page, ptr.offset, new_thdr)
+    
+    # Recompute page checksum
+    page_header_encode(page, hdr)
+    return (page, true)
+
+# Update an MVCC tuple: marks old version with xmax = txn_id and inserts new version
+def heap_mvcc_update(
+    page: Bytes,
+    old_slot_id: Int,
+    new_user_payload: Bytes,
+    txn_id: Int,
+    cid: Int
+) -> Tuple[Bytes, Int, Bool]:
+    (p_after_del, del_ok) := heap_mvcc_delete(page, old_slot_id, txn_id, cid)
+    if !del_ok:
+        return (page, -1, false)
+    return heap_mvcc_insert(p_after_del, new_user_payload, txn_id, cid)
+
+# Scan all tuple slot IDs in a page visible to a given snapshot (TID scan)
+def heap_mvcc_scan(
+    page: Bytes,
+    snapshot: Snapshot,
+    current_txn_id: Int,
+    tx_mgr: TxManager
+) -> List[Int]:
+    hdr := page_header_decode(page)
+    mut visible_slots := list_new()
+    
+    mut s := 0
+    while s < hdr.slot_count:
+        ptr := item_pointer_decode(page, s)
+        if ptr.offset > 0 && ptr.length >= 24:
+            thdr := tuple_header_decode(page, ptr.offset)
+            if mvcc_is_tuple_visible(thdr, snapshot, current_txn_id, tx_mgr):
+                list_push(visible_slots, s)
+        s = s + 1
+    return visible_slots
+
+# Get the user payload for a visible slot
+def heap_mvcc_get(page: Bytes, slot_id: Int) -> Bytes:
+    hdr := page_header_decode(page)
+    if slot_id < 0 || slot_id >= hdr.slot_count:
+        return bytes_alloc(0)
+    ptr := item_pointer_decode(page, slot_id)
+    if ptr.offset == 0 || ptr.length < 24:
+        return bytes_alloc(0)
+    raw_tuple := bytes_slice(page, ptr.offset, ptr.length)
+    return tuple_extract_payload(raw_tuple)
+
+# VACUUM: Reclaims dead tuple versions that are strictly older than oldest_active_xmin
+def heap_vacuum_page(
+    page: Bytes,
+    oldest_active_xmin: Int,
+    tx_mgr: TxManager
+) -> Tuple[Bytes, Int]:
+    hdr := page_header_decode(page)
+    mut dead_count := 0
+    mut mut_page := page
+    
+    mut s := 0
+    while s < hdr.slot_count:
+        ptr := item_pointer_decode(mut_page, s)
+        if ptr.offset > 0 && ptr.length >= 24:
+            thdr := tuple_header_decode(mut_page, ptr.offset)
+            # Tuple is dead if xmax is committed and older than oldest active transaction
+            if thdr.xmax > 0 && thdr.xmax < oldest_active_xmin:
+                if tx_get_status(tx_mgr, thdr.xmax) == TXN_COMMITTED():
+                    (p_after_dead, del_ok) := heap_page_delete(mut_page, s)
+                    mut_page = p_after_dead
+                    dead_count = dead_count + 1
+        s = s + 1
+        
+    if dead_count > 0:
+        compacted := heap_page_compact(mut_page)
+        return (compacted, dead_count)
+    return (mut_page, 0)

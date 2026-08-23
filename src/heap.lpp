@@ -1,0 +1,123 @@
+# samardb-heap: Slotted Page Tuple Storage and Tuple Operations
+# Implements PostgreSQL slotted page layout per docs/format/page.md
+
+import bytes
+import pager
+
+# Item Pointer (Slot) Layout: 4 bytes per item
+# Offset 0..1: offset within page (u16)
+# Offset 2..3: length of tuple data (u16)
+
+struct ItemPointer:
+    offset: Int
+    length: Int
+
+def item_pointer_encode(b: Bytes, slot_idx: Int, offset: Int, length: Int):
+    pos := 32 + slot_idx * 4
+    bytes_set16le(b, pos, offset)
+    bytes_set16le(b, pos + 2, length)
+
+def item_pointer_decode(b: Bytes, slot_idx: Int) -> ItemPointer:
+    pos := 32 + slot_idx * 4
+    off := bytes_get16le(b, pos)
+    ptr_len := bytes_get16le(b, pos + 2)
+    return ItemPointer(off, ptr_len)
+
+# Format a fresh, empty Heap Page
+def heap_page_init(page_size: Int) -> Bytes:
+    b := bytes_alloc(page_size)
+    hdr := PageHeader(0, 0, 1, 0, 1, 0, 32, page_size, page_size)
+    page_header_encode(b, hdr)
+    return b
+
+# Insert a tuple into a slotted page (High-Throughput Fast-Path)
+# Returns (updated_page, slot_id, success)
+def heap_page_insert(b: Bytes, tuple_bytes: Bytes) -> Tuple[Bytes, Int, Bool]:
+    tlen := bytes_len(tuple_bytes)
+    page_size := bytes_len(b)
+    slot_count := bytes_get16le(b, 18)
+    mut lower := bytes_get16le(b, 20)
+    mut upper := bytes_get16le(b, 22)
+    if upper == 0 && lower == 0:
+        upper = page_size
+        lower = 32
+    
+    needed := 4 + tlen
+    free_space := upper - lower
+    if free_space < needed:
+        return (b, -1, false)
+        
+    new_upper := upper - tlen
+    new_lower := lower + 4
+    slot_id := slot_count
+    
+    # 1. Zero-copy transfer tuple data to [new_upper, upper)
+    bytes_copy(b, new_upper, tuple_bytes, 0, tlen)
+    
+    # 2. Write item pointer at [lower, new_lower)
+    item_pointer_encode(b, slot_id, new_upper, tlen)
+    
+    # 3. Direct in-place header update
+    bytes_set16le(b, 18, slot_count + 1)
+    bytes_set16le(b, 20, new_lower)
+    bytes_set16le(b, 22, new_upper)
+    c := bytes_crc32(b, 4, page_size - 4)
+    bytes_set32le(b, 0, c)
+    return (b, slot_id, true)
+
+# Read a tuple from a slotted page by slot_id
+def heap_page_read(b: Bytes, slot_id: Int) -> Tuple[Bytes, Bool]:
+    hdr := page_header_decode(b)
+    if slot_id < 0 || slot_id >= hdr.slot_count:
+        return (bytes_alloc(0), false)
+        
+    ptr := item_pointer_decode(b, slot_id)
+    if ptr.offset == 0 || ptr.length == 0:
+        return (bytes_alloc(0), false)
+        
+    tuple_data := bytes_slice(b, ptr.offset, ptr.length)
+    return (tuple_data, true)
+
+# Mark a tuple as dead / deleted in the slot directory
+def heap_page_delete(b: Bytes, slot_id: Int) -> Tuple[Bytes, Bool]:
+    hdr := page_header_decode(b)
+    if slot_id < 0 || slot_id >= hdr.slot_count:
+        return (b, false)
+        
+    item_pointer_encode(b, slot_id, 0, 0)
+    page_header_encode(b, hdr) # Recompute checksum
+    return (b, true)
+
+# Compact page to defragment space after deletes
+def heap_page_compact(b: Bytes) -> Bytes:
+    hdr := page_header_decode(b)
+    page_size := bytes_len(b)
+    new_page := heap_page_init(page_size)
+    
+    mut current_upper := page_size
+    mut new_lower := 32
+    mut s := 0
+    while s < hdr.slot_count:
+        ptr := item_pointer_decode(b, s)
+        if ptr.offset > 0 && ptr.length > 0:
+            current_upper = current_upper - ptr.length
+            bytes_copy(new_page, current_upper, b, ptr.offset, ptr.length)
+            item_pointer_encode(new_page, s, current_upper, ptr.length)
+        else:
+            item_pointer_encode(new_page, s, 0, 0)
+        new_lower = new_lower + 4
+        s = s + 1
+        
+    new_hdr := PageHeader(
+        0,
+        hdr.lsn,
+        hdr.page_type,
+        hdr.flags,
+        hdr.format_version,
+        hdr.slot_count,
+        new_lower,
+        current_upper,
+        hdr.special_offset
+    )
+    page_header_encode(new_page, new_hdr)
+    return new_page

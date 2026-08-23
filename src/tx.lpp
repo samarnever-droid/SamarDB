@@ -1,0 +1,127 @@
+# samardb-tx: Transaction Manager, Commit Log (CLOG), and Snapshots
+# Implements Invariant I1 (durability on commit) and ACID isolation
+
+import bytes
+import wal
+
+# Transaction Status Constants
+# 0 = IN_PROGRESS, 1 = COMMITTED, 2 = ABORTED
+def TXN_IN_PROGRESS() -> Int:
+    return 0
+
+def TXN_COMMITTED() -> Int:
+    return 1
+
+def TXN_ABORTED() -> Int:
+    return 2
+
+struct Snapshot:
+    xmin: Int
+    xmax: Int
+    active_txns: List[Int]
+
+struct TxManager:
+    next_tx_id: Int
+    active_txns: List[Int]
+    clog_buffer: Bytes
+
+def tx_manager_new(initial_clog_size: Int) -> TxManager:
+    clog := bytes_alloc(initial_clog_size)
+    active := list_new()
+    return TxManager(1, active, clog)
+
+def bit_shift_multiplier(shift: Int) -> Int:
+    if shift == 0:
+        return 1
+    if shift == 2:
+        return 4
+    if shift == 4:
+        return 16
+    if shift == 6:
+        return 64
+    return 1
+
+# Set 2-bit transaction status in CLOG
+def tx_set_status(mgr: TxManager, txn_id: Int, status: Int) -> TxManager:
+    byte_offset := txn_id / 4
+    bit_shift := (txn_id % 4) * 2
+    
+    old_val := bytes_get8(mgr.clog_buffer, byte_offset)
+    mult := bit_shift_multiplier(bit_shift)
+    mask := 255 - (3 * mult)
+    new_val := (old_val & mask) | ((status % 4) * mult)
+    bytes_set8(mgr.clog_buffer, byte_offset, new_val)
+    return mgr
+
+# Read 2-bit transaction status from CLOG
+def tx_get_status(mgr: TxManager, txn_id: Int) -> Int:
+    byte_offset := txn_id / 4
+    bit_shift := (txn_id % 4) * 2
+    if byte_offset >= bytes_len(mgr.clog_buffer):
+        return TXN_IN_PROGRESS()
+    val := bytes_get8(mgr.clog_buffer, byte_offset)
+    mult := bit_shift_multiplier(bit_shift)
+    return (val / mult) % 4
+
+# Begin a new transaction
+def tx_begin(mgr: TxManager) -> Tuple[TxManager, Int]:
+    txn_id := mgr.next_tx_id
+    list_push(mgr.active_txns, txn_id)
+    mgr_with_active := TxManager(txn_id + 1, mgr.active_txns, mgr.clog_buffer)
+    mgr_after_status := tx_set_status(mgr_with_active, txn_id, TXN_IN_PROGRESS())
+    return (mgr_after_status, txn_id)
+
+# Remove a transaction from the active list
+def tx_remove_active(active_list: List[Int], target_id: Int) -> List[Int]:
+    mut out := list_new()
+    mut i := 0
+    while i < len(active_list):
+        if active_list[i] != target_id:
+            list_push(out, active_list[i])
+        i = i + 1
+    return out
+
+# Commit a transaction: write commit WAL record and update CLOG
+def tx_commit(mgr: TxManager, txn_id: Int, wal_mgr: WalManager) -> Tuple[TxManager, WalManager]:
+    # Record Type 2 = COMMIT
+    empty_payload := bytes_alloc(0)
+    (w_mgr_after_log, lsn) := wal_append_record(wal_mgr, txn_id, 0, 2, empty_payload)
+    
+    # Update active list and CLOG status
+    new_active := tx_remove_active(mgr.active_txns, txn_id)
+    mgr_without_active := TxManager(mgr.next_tx_id, new_active, mgr.clog_buffer)
+    mgr_after_status := tx_set_status(mgr_without_active, txn_id, TXN_COMMITTED())
+    return (mgr_after_status, w_mgr_after_log)
+
+# Abort / Rollback a transaction
+def tx_abort(mgr: TxManager, txn_id: Int, wal_mgr: WalManager) -> Tuple[TxManager, WalManager]:
+    # Record Type 3 = ABORT
+    empty_payload := bytes_alloc(0)
+    (w_mgr_after_log, lsn) := wal_append_record(wal_mgr, txn_id, 0, 3, empty_payload)
+    
+    new_active := tx_remove_active(mgr.active_txns, txn_id)
+    mgr_without_active := TxManager(mgr.next_tx_id, new_active, mgr.clog_buffer)
+    mgr_after_status := tx_set_status(mgr_without_active, txn_id, TXN_ABORTED())
+    return (mgr_after_status, w_mgr_after_log)
+
+# Capture a point-in-time Snapshot for MVCC
+def tx_get_snapshot(mgr: TxManager) -> Snapshot:
+    mut lowest_active := mgr.next_tx_id
+    mut snap_active := list_new()
+    mut i := 0
+    while i < len(mgr.active_txns):
+        tid := mgr.active_txns[i]
+        list_push(snap_active, tid)
+        if tid < lowest_active:
+            lowest_active = tid
+        i = i + 1
+    return Snapshot(lowest_active, mgr.next_tx_id, snap_active)
+
+# Check if a txn_id was active at snapshot time
+def snapshot_is_active(snap: Snapshot, txn_id: Int) -> Bool:
+    mut i := 0
+    while i < len(snap.active_txns):
+        if snap.active_txns[i] == txn_id:
+            return true
+        i = i + 1
+    return false

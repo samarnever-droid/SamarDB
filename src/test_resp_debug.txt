@@ -1,0 +1,10 @@
+def debug_resp():
+    c_resp0 := hypercache_new(1000, 64)
+    (c_resp1, p_out) := resp_handle_command(c_resp0, "PING")
+    (c_resp2, s_out) := resp_handle_command(c_resp1, "SET session:99 active EX 3600")
+    (c_resp3, g_out) := resp_handle_command(c_resp2, "GET session:99")
+    (c_resp4, d_out) := resp_handle_command(c_resp3, "DBSIZE")
+    print_str(str_concat("P: ", p_out))
+    print_str(str_concat("S: ", s_out))
+    print_str(str_concat("G: ", g_out))
+    print_str(str_concat("D: ", d_out))

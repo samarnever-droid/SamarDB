@@ -1,0 +1,230 @@
+# samardb Phase 7 Test Suite: Raft Consensus Engine
+# Verifies: election protocol, quorum commit, log replication,
+#           AppendEntries rejection, and leader crash / re-election.
+
+import bytes
+import raft
+
+# ── Test Framework ────────────────────────────────────────────────────────────
+def ci(label: Str, got: Int, want: Int) -> Int:
+    if got == want:
+        print_str(str_concat("  [PASS] ", label))
+        return 1
+    else:
+        out := str_concat("  [FAIL] ", label)
+        out2 := str_concat(out, str_concat("  got=", int_to_str(got)))
+        print_str(str_concat(out2, str_concat(" want=", int_to_str(want))))
+        return 0
+
+def cb(label: Str, got: Bool, want: Bool) -> Int:
+    ok := (got && want) || (!got && !want)
+    if ok:
+        print_str(str_concat("  [PASS] ", label))
+        return 1
+    else:
+        print_str(str_concat("  [FAIL] ", label))
+        return 0
+
+# ── Node Construction Helpers ─────────────────────────────────────────────────
+# Avoids multiline struct literal parse errors by wrapping in a function.
+
+def make_follower(node_id: Int, term: Int, n_peers: Int) -> RaftNode:
+    return raft_node_new_with_role(node_id, RAFT_FOLLOWER(), term, -1, 0, 0, n_peers)
+
+def make_follower_voted(node_id: Int, term: Int, voted_for: Int, n_peers: Int) -> RaftNode:
+    return raft_node_new_with_role(node_id, RAFT_FOLLOWER(), term, voted_for, 0, 0, n_peers)
+
+def make_leader(node_id: Int, term: Int, vote_count: Int, commit: Int, n_peers: Int) -> RaftNode:
+    return raft_node_new_with_role(node_id, RAFT_LEADER(), term, node_id, vote_count, commit, n_peers)
+
+def make_ae_msg(from_n: Int, to_n: Int, term: Int, pli: Int, plt: Int, lc: Int, ec: Int, et: Int, ei: Int, ed: Int) -> RaftMessage:
+    return RaftMessage(RAFT_MSG_APPEND_ENTRIES(), from_n, to_n, term, 0, 0, 0, false, from_n, pli, plt, lc, ec, et, ei, ed, false, 0)
+
+def make_rv_msg(from_n: Int, to_n: Int, term: Int, lli: Int, llt: Int) -> RaftMessage:
+    return RaftMessage(RAFT_MSG_REQUEST_VOTE(), from_n, to_n, term, from_n, lli, llt, false, 0, 0, 0, 0, 0, 0, 0, 0, false, 0)
+
+# Check stale term AppendEntries rejection (extracted to avoid 3rd tuple destructure in same scope)
+def check_stale_rejection() -> Int:
+    mut p := 0
+    f_ht := make_follower(1, 5, 3)
+    ae_stale := make_ae_msg(0, 1, 3, 0, 0, 0, 0, 0, 0, 0)
+    (f_stalerm, net_stale) := raft_handle_append_entries(f_ht, simnet_new(), ae_stale)
+    reply_stale := simnet_fetch_msg(net_stale, 0)
+    p = p + cb("Stale term AE: success is false", reply_stale.success, false)
+    p = p + ci("Stale term AE: reply term is follower's term (5)", reply_stale.term, 5)
+    p = p + ci("Stale term AE: follower term unchanged (5)", f_stalerm.current_term, 5)
+    return p
+
+# ── [1/5] Single-Node Initial State & Election ────────────────────────────────
+def test_single_node_election() -> Int:
+    print_str("--- [1/5] Testing Single-Node Election State ---")
+    mut p := 0
+    node := raft_node_new(0, 1)
+    p = p + ci("Initial role is FOLLOWER (0)", node.role, RAFT_FOLLOWER())
+    p = p + ci("Initial term is 0", node.current_term, 0)
+    p = p + ci("Initial voted_for is -1", node.voted_for, -1)
+    p = p + ci("Initial commit_index is 0", node.commit_index, 0)
+    p = p + ci("Log has sentinel entry only (len=1)", len(node.log_terms), 1)
+    p = p + ci("Log sentinel term is 0", node.log_terms[0], 0)
+
+    (n_cand, net_after) := raft_tick_election(node, simnet_new())
+    p = p + ci("After tick_election: role is CANDIDATE (1)", n_cand.role, RAFT_CANDIDATE())
+    p = p + ci("After tick_election: term incremented to 1", n_cand.current_term, 1)
+    p = p + ci("After tick_election: voted_for is self (0)", n_cand.voted_for, 0)
+    p = p + ci("After tick_election: vote_count is 1", n_cand.vote_count, 1)
+    # n_peers=1: no peers to broadcast RequestVote to
+    p = p + ci("n_peers=1: no RequestVote messages sent", net_after.total_sent, 0)
+    return p
+
+# ── [2/5] 3-Node Election & Leader Promotion ──────────────────────────────────
+def test_three_node_election() -> Int:
+    print_str("--- [2/5] Testing 3-Node Election & Leader Promotion ---")
+    mut p := 0
+
+    # Node 0 fires election → CANDIDATE, broadcasts RequestVote to nodes 1 & 2
+    n0_init := raft_node_new(0, 3)
+    n1_init := raft_node_new(1, 3)
+    (n0_cand, net_a) := raft_tick_election(n0_init, simnet_new())
+    p = p + ci("Node 0 is CANDIDATE (1)", n0_cand.role, RAFT_CANDIDATE())
+    p = p + ci("Node 0 term is 1", n0_cand.current_term, 1)
+    p = p + ci("2 RequestVote messages in flight", net_a.total_sent, 2)
+
+    # Fetch the RequestVote to node 1 (msg index 0)
+    rv_to_1 := simnet_fetch_msg(net_a, 0)
+    p = p + ci("RequestVote type is 1", rv_to_1.msg_type, RAFT_MSG_REQUEST_VOTE())
+    p = p + ci("RequestVote from_node is 0", rv_to_1.from_node, 0)
+    p = p + ci("RequestVote term is 1", rv_to_1.term, 1)
+
+    # Node 1 handles RequestVote → grants vote
+    (n1_voted, net_b) := raft_handle_request_vote(n1_init, net_a, rv_to_1)
+    p = p + ci("Node 1 voted_for set to 0", n1_voted.voted_for, 0)
+    p = p + ci("VoteReply sent: total_sent = 3", net_b.total_sent, 3)
+
+    # Node 0 handles VoteReply from node 1 (msg at index 2)
+    vr_from_1 := simnet_fetch_msg(net_b, 2)
+    p = p + ci("VoteReply type is 2", vr_from_1.msg_type, RAFT_MSG_VOTE_REPLY())
+    p = p + cb("VoteReply vote_granted is true", vr_from_1.vote_granted, true)
+
+    (n0_leader, net_c) := raft_handle_vote_reply(n0_cand, net_b, vr_from_1)
+    p = p + ci("Node 0 becomes LEADER (role=2)", n0_leader.role, RAFT_LEADER())
+    p = p + ci("Node 0 term is still 1", n0_leader.current_term, 1)
+    # Leader sends heartbeats to peers 1 and 2: 2+1+2 = 5 total
+    p = p + ci("Leader sends 2 heartbeats: total_sent=5", net_c.total_sent, 5)
+    return p
+
+# ── [3/5] Log Replication & Quorum Commit ────────────────────────────────────
+def test_log_replication() -> Int:
+    print_str("--- [3/5] Testing Log Replication & Quorum Commit ---")
+    mut p := 0
+
+    leader_init := make_leader(0, 1, 2, 0, 3)
+    follower1 := raft_node_new(1, 3)
+
+    (leader_a, net_a) := raft_append_command(leader_init, simnet_new(), 42)
+    p = p + ci("Leader log len=2 after append", len(leader_a.log_terms), 2)
+    p = p + ci("Leader log_data[1] = 42", leader_a.log_data[1], 42)
+    p = p + ci("2 AppendEntries messages in flight", net_a.total_sent, 2)
+
+    ae_msg := simnet_fetch_msg(net_a, 0)
+    p = p + ci("AppendEntries type is 3", ae_msg.msg_type, RAFT_MSG_APPEND_ENTRIES())
+    p = p + ci("AppendEntries entries_count is 1", ae_msg.entries_count, 1)
+    p = p + ci("AppendEntries entry_data is 42", ae_msg.entry_data, 42)
+
+    (f1_after, net_b) := raft_handle_append_entries(follower1, net_a, ae_msg)
+    p = p + ci("Follower 1 log len=2 after AE", len(f1_after.log_terms), 2)
+    p = p + ci("Follower 1 log_data[1] = 42", f1_after.log_data[1], 42)
+
+    ar_msg := simnet_fetch_msg(net_b, 2)
+    p = p + ci("AppendReply type is 4", ar_msg.msg_type, RAFT_MSG_APPEND_REPLY())
+    p = p + cb("AppendReply success is true", ar_msg.success, true)
+    p = p + ci("AppendReply match_index is 1", ar_msg.match_index, 1)
+
+    (leader_b, net_c) := raft_handle_append_reply(leader_a, net_b, ar_msg)
+    p = p + ci("Leader commit_index advances to 1 after quorum", leader_b.commit_index, 1)
+    return p
+
+# ── [4/5] AppendEntries Rejection & Stale Term ───────────────────────────────
+def test_append_rejection() -> Int:
+    print_str("--- [4/5] Testing AppendEntries Rejection & Stale Term ---")
+    mut p := 0
+
+    # Follower 1 has only the sentinel; leader sends prev_log_index=5 (inconsistent)
+    follower := raft_node_new(1, 3)
+    ae_ahead := make_ae_msg(0, 1, 1, 5, 1, 0, 1, 1, 6, 99)
+    (f1, net_a) := raft_handle_append_entries(follower, simnet_new(), ae_ahead)
+    ar_rej := simnet_fetch_msg(net_a, 0)
+    p = p + ci("Rejection reply type is 4", ar_rej.msg_type, RAFT_MSG_APPEND_REPLY())
+    p = p + cb("Rejection reply success is false", ar_rej.success, false)
+    p = p + ci("Follower log unchanged (len=1)", len(f1.log_terms), 1)
+
+    # Leader handles the rejection: next_index[peer] at floor=1 stays at 1
+    leader_base := make_leader(0, 1, 2, 1, 3)
+    (leader_rej, net_b) := raft_handle_append_reply(leader_base, net_a, ar_rej)
+    p = p + ci("After rejection at floor: next_index[1] stays at 1", leader_rej.next_index[1], 1)
+
+    # Stale term rejection: follower at term 5 rejects AE with term 3
+    p = p + check_stale_rejection()
+    return p
+
+
+
+
+# ── [5/5] Leader Crash & Re-Election ─────────────────────────────────────────
+def test_leader_crash_reelection() -> Int:
+    print_str("--- [5/5] Testing Leader Crash & Re-Election ---")
+    mut p := 0
+
+    # Node 1 fires election (old leader node 0 assumed crashed)
+    n1_at1 := make_follower_voted(1, 1, 0, 3)
+    (n1_cand, net_a) := raft_tick_election(n1_at1, simnet_new())
+    p = p + ci("Node 1 becomes CANDIDATE at term 2", n1_cand.current_term, 2)
+    p = p + ci("RequestVote broadcast: 2 messages", net_a.total_sent, 2)
+
+    # Node 2 (follower at term 1) grants vote to node 1
+    n2_at1 := make_follower(2, 1, 3)
+    # RequestVote to node 2 is at msg index 1 (index 0 goes to peer 0)
+    rv_to_2 := simnet_fetch_msg(net_a, 1)
+    p = p + ci("RequestVote to node 2: from_node=1", rv_to_2.from_node, 1)
+    (n2_voted, net_b) := raft_handle_request_vote(n2_at1, net_a, rv_to_2)
+    p = p + ci("Node 2 voted_for is 1", n2_voted.voted_for, 1)
+
+    # VoteReply from node 2 → node 1 (last message sent = index 2)
+    vr_to_1 := simnet_fetch_msg(net_b, 2)
+    p = p + cb("VoteReply: vote_granted=true", vr_to_1.vote_granted, true)
+    (n1_leader, net_c) := raft_handle_vote_reply(n1_cand, net_b, vr_to_1)
+    p = p + ci("Node 1 becomes LEADER (role=2)", n1_leader.role, RAFT_LEADER())
+    p = p + ci("New leader term is 2", n1_leader.current_term, 2)
+
+    # Old leader (node 0 at term 1) receives AE from new leader (term 2) → demoted
+    n0_old := make_leader(0, 1, 2, 0, 3)
+    ae_from_new := make_ae_msg(1, 0, 2, 0, 0, 0, 0, 0, 0, 0)
+    (n0_demoted, net_d) := raft_handle_append_entries(n0_old, simnet_new(), ae_from_new)
+    p = p + ci("Old leader demoted to FOLLOWER (0)", n0_demoted.role, RAFT_FOLLOWER())
+    p = p + ci("Old leader term updated to 2", n0_demoted.current_term, 2)
+
+    # Node 2 (now at term 2) rejects stale RequestVote from old candidate (term 1)
+    n2_term2 := make_follower_voted(2, 2, 1, 3)
+    rv_stale := make_rv_msg(0, 2, 1, 0, 0)
+    (n2_denied, net_e) := raft_handle_request_vote(n2_term2, simnet_new(), rv_stale)
+    deny_reply := simnet_fetch_msg(net_e, 0)
+    p = p + cb("Stale RequestVote denied: vote_granted=false", deny_reply.vote_granted, false)
+    p = p + ci("Deny reply term is 2 (responder's current term)", deny_reply.term, 2)
+    return p
+
+def main():
+    print_str("================================================================")
+    print_str("    SamarDB Phase 7 Raft Consensus Engine Suite               ")
+    print_str("================================================================")
+    p_one := test_single_node_election()
+    p_two := test_three_node_election()
+    p_three := test_log_replication()
+    p_four := test_append_rejection()
+    p_five := test_leader_crash_reelection()
+    total := p_one + p_two + p_three + p_four + p_five
+    print_str("================================================================")
+    if total >= 35:
+        print_str(str_concat(" [SUCCESS] All ", str_concat(int_to_str(total), " SamarDB Phase 7 Raft Assertions Passed!")))
+    else:
+        failed := 35 - total
+        print_str(str_concat(" [FAILED] ", str_concat(int_to_str(failed), str_concat(" failures, ", str_concat(int_to_str(total), " passed")))))
+    print_str("================================================================")

@@ -1,0 +1,348 @@
+# samardb-opt: Cost-Based Query Optimizer
+# Implements docs/adr/0006-cost-based-optimizer.md
+# System-R / Selinger DP join ordering, selectivity estimation, scan selection, predicate pushdown
+
+import schema
+import parser
+import exec
+
+# ── Cost Constants (dimensionless units) ─────────────────────────────────────
+def PAGE_FETCH_COST() -> Int:
+    return 100      # scaled x100 to stay in integer arithmetic
+    
+def IDX_PAGE_COST() -> Int:
+    return 100
+
+def TUPLE_FETCH_COST() -> Int:
+    return 50
+
+def CPU_COST() -> Int:
+    return 1
+
+# ── Table Statistics ──────────────────────────────────────────────────────────
+# Parallel lists keyed by index position
+struct StatCatalog:
+    # table stats (one entry per table)
+    tbl_names:   List[Str]
+    tbl_n_pages: List[Int]
+    tbl_n_tuples:List[Int]
+    # column stats (one entry per (table, col) pair)
+    col_tbl:     List[Str]
+    col_name:    List[Str]
+    col_ndv:     List[Int]    # number of distinct values
+    col_null_frac:List[Int]   # null fraction * 10000
+    # index stats (one entry per indexed column)
+    idx_tbl:     List[Str]
+    idx_col:     List[Str]
+    idx_levels:  List[Int]    # B+ Tree depth (root to leaf)
+    idx_n_pages: List[Int]    # total B+ Tree page count
+
+def stat_catalog_new() -> StatCatalog:
+    return StatCatalog(
+        list_new(), list_new(), list_new(),
+        list_new(), list_new(), list_new(), list_new(),
+        list_new(), list_new(), list_new(), list_new()
+    )
+
+# ── Register a table into the statistics catalog ──────────────────────────────
+def stats_add_table(sc: StatCatalog, tbl: Str, n_pages: Int, n_tuples: Int) -> StatCatalog:
+    list_push(sc.tbl_names, tbl)
+    list_push(sc.tbl_n_pages, n_pages)
+    list_push(sc.tbl_n_tuples, n_tuples)
+    return sc
+
+# ── Register column statistics ────────────────────────────────────────────────
+def stats_add_column(sc: StatCatalog, tbl: Str, col: Str, ndv: Int, null_frac: Int) -> StatCatalog:
+    list_push(sc.col_tbl, tbl)
+    list_push(sc.col_name, col)
+    list_push(sc.col_ndv, ndv)
+    list_push(sc.col_null_frac, null_frac)
+    return sc
+
+# ── Register index statistics ─────────────────────────────────────────────────
+def stats_add_index(sc: StatCatalog, tbl: Str, col: Str, levels: Int, n_pages: Int) -> StatCatalog:
+    list_push(sc.idx_tbl, tbl)
+    list_push(sc.idx_col, col)
+    list_push(sc.idx_levels, levels)
+    list_push(sc.idx_n_pages, n_pages)
+    return sc
+
+# ── Lookup helpers ────────────────────────────────────────────────────────────
+def stats_get_n_tuples(sc: StatCatalog, tbl: Str) -> Int:
+    mut i := 0
+    while i < len(sc.tbl_names):
+        if str_eq_ci(sc.tbl_names[i], tbl):
+            return sc.tbl_n_tuples[i]
+        i = i + 1
+    return 1    # fallback: assume 1 tuple (safe lower bound)
+
+def stats_get_n_pages(sc: StatCatalog, tbl: Str) -> Int:
+    mut i := 0
+    while i < len(sc.tbl_names):
+        if str_eq_ci(sc.tbl_names[i], tbl):
+            return sc.tbl_n_pages[i]
+        i = i + 1
+    return 1
+
+def stats_get_ndv(sc: StatCatalog, tbl: Str, col: Str) -> Int:
+    mut i := 0
+    while i < len(sc.col_tbl):
+        if str_eq_ci(sc.col_tbl[i], tbl) && str_eq_ci(sc.col_name[i], col):
+            return sc.col_ndv[i]
+        i = i + 1
+    return 1    # fallback: 1 distinct value → selectivity 1.0
+
+def stats_has_index(sc: StatCatalog, tbl: Str, col: Str) -> Bool:
+    mut i := 0
+    while i < len(sc.idx_tbl):
+        if str_eq_ci(sc.idx_tbl[i], tbl) && str_eq_ci(sc.idx_col[i], col):
+            return true
+        i = i + 1
+    return false
+
+def stats_get_idx_levels(sc: StatCatalog, tbl: Str, col: Str) -> Int:
+    mut i := 0
+    while i < len(sc.idx_tbl):
+        if str_eq_ci(sc.idx_tbl[i], tbl) && str_eq_ci(sc.idx_col[i], col):
+            return sc.idx_levels[i]
+        i = i + 1
+    return 2    # assume 2-level B+ Tree
+
+# ── Selectivity Estimation ────────────────────────────────────────────────────
+# Returns selectivity * 10000 (fixed-point percentage, [1, 10000])
+# 10000 = 100% (full scan), 1 = 0.01% (most selective)
+
+def clamp_sel(sel: Int, n_tuples: Int) -> Int:
+    # minimum = 1 / n_tuples * 10000 (at least one tuple)
+    mut min_sel := 1
+    if n_tuples > 0:
+        min_sel = 10000 / n_tuples
+        if min_sel < 1:
+            min_sel = 1
+    if sel < min_sel:
+        return min_sel
+    if sel > 10000:
+        return 10000
+    return sel
+
+def estimate_selectivity(sc: StatCatalog, tbl: Str, col: Str, op: Int, val: Int) -> Int:
+    ndv := stats_get_ndv(sc, tbl, col)
+    n_tuples := stats_get_n_tuples(sc, tbl)
+    
+    if ndv <= 0:
+        return 10000    # no stats → full selectivity
+
+    if op == OP_EQ():
+        # sel = 1 / ndv
+        sel := 10000 / ndv
+        return clamp_sel(sel, n_tuples)
+        
+    if op == OP_NEQ():
+        # sel = (ndv - 1) / ndv
+        if ndv <= 1:
+            return clamp_sel(1, n_tuples)
+        sel := 10000 * (ndv - 1) / ndv
+        return clamp_sel(sel, n_tuples)
+        
+    if op == OP_LT() || op == OP_LTE():
+        # Without a histogram, assume uniform distribution: val fraction of range
+        # For simplicity, estimate 33% for range predicates (symmetric uniform assumption)
+        return clamp_sel(3333, n_tuples)
+        
+    if op == OP_GT() || op == OP_GTE():
+        # symmetric: 1 - sel(LT) ≈ 66%
+        return clamp_sel(6666, n_tuples)
+        
+    # Unknown op: no filtering
+    return 10000
+
+# ── Scan Cost Estimation ──────────────────────────────────────────────────────
+# Returns: Tuple[cost: Int, use_index: Bool]
+# Both costs are in integer "units" (PAGE_FETCH_COST × pages scaled by 100)
+
+def estimate_scan_cost(
+    sc: StatCatalog,
+    tbl: Str,
+    where_col: Str,
+    where_op: Int
+) -> Tuple[Int, Bool]:
+    n_pages := stats_get_n_pages(sc, tbl)
+    n_tuples := stats_get_n_tuples(sc, tbl)
+    
+    cost_seq := n_pages * PAGE_FETCH_COST()
+    
+    # Can we use an index?
+    if str_len(where_col) > 0 && where_op != OP_NONE() && stats_has_index(sc, tbl, where_col):
+        sel_frac := estimate_selectivity(sc, tbl, where_col, where_op, 0)
+        levels := stats_get_idx_levels(sc, tbl, where_col)
+        # cost_idx = levels × IDX_PAGE_COST + (sel/10000) × n_tuples × TUPLE_FETCH_COST
+        # To avoid floating point: scale by 10000
+        cost_idx := levels * IDX_PAGE_COST() + sel_frac * n_tuples * TUPLE_FETCH_COST() / 10000
+        if cost_idx < cost_seq:
+            return (cost_idx, true)
+    
+    return (cost_seq, false)
+
+# ── Physical Plan Node ────────────────────────────────────────────────────────
+# PlanNode encodes the chosen physical plan as a flat struct.
+# For Phase 5, a single-level plan or a two-relation join is represented.
+
+# Plan node types
+def PLAN_SEQSCAN() -> Int:
+    return 1
+
+def PLAN_INDEXSCAN() -> Int:
+    return 2
+
+def PLAN_FILTER() -> Int:
+    return 3
+
+def PLAN_PROJECT() -> Int:
+    return 4
+
+def PLAN_NLJ() -> Int:
+    return 5
+
+struct PlanNode:
+    node_type:   Int
+    table_name:  Str
+    col_names:   List[Str]   # projected columns (empty = all)
+    where_col:   Str
+    where_op:    Int
+    where_val:   Int
+    join_tbl:    Str         # join table (if NLJ)
+    join_left:   Str         # join left key column
+    join_right:  Str         # join right key column
+    est_cost:    Int         # estimated cost (integer units × 100)
+    est_rows:    Int         # estimated output row count
+
+def plan_node_new(
+    node_type: Int,
+    table_name: Str,
+    col_names: List[Str],
+    where_col: Str,
+    where_op: Int,
+    where_val: Int,
+    join_tbl: Str,
+    join_left: Str,
+    join_right: Str,
+    est_cost: Int,
+    est_rows: Int
+) -> PlanNode:
+    return PlanNode(
+        node_type, table_name, col_names,
+        where_col, where_op, where_val,
+        join_tbl, join_left, join_right,
+        est_cost, est_rows
+    )
+
+def plan_node_empty() -> PlanNode:
+    return PlanNode(0, "", list_new(), "", 0, 0, "", "", "", 0, 0)
+
+# ── Main Optimizer Entry Point ────────────────────────────────────────────────
+# Converts a ParsedQuery AST into a cost-annotated PlanNode via:
+#   1. Predicate pushdown (attach WHERE to base scan)
+#   2. Scan selection (SeqScan vs IndexScan based on cost model)
+#   3. Join ordering (if 2 tables: choose best join order by outer-inner cost)
+#   4. Projection (wrap with column subset if not SELECT *)
+
+def optimize(sc: StatCatalog, pq: ParsedQuery) -> PlanNode:
+    tbl := pq.table_name
+    n_tuples := stats_get_n_tuples(sc, tbl)
+
+    # ── Step 1: Predicate pushdown & scan selectivity ─────────────────────────
+    sel_frac := estimate_selectivity(sc, tbl, pq.where_col_name, pq.where_op, pq.where_val)
+    mut est_rows := n_tuples * sel_frac / 10000
+    if est_rows < 1:
+        est_rows = 1
+
+    # ── Step 2: Scan selection ────────────────────────────────────────────────
+    (scan_cost, use_idx) := estimate_scan_cost(sc, tbl, pq.where_col_name, pq.where_op)
+    mut scan_type := PLAN_SEQSCAN()
+    if use_idx:
+        scan_type = PLAN_INDEXSCAN()
+
+    # Filter cost on top of scan (if there's a WHERE clause)
+    mut total_cost := scan_cost
+    if pq.where_op != OP_NONE():
+        filter_cost := est_rows * CPU_COST()
+        total_cost = scan_cost + filter_cost
+
+    # ── Step 3: Join ordering (if a JOIN clause is present) ───────────────────
+    if str_len(pq.join_table_name) > 0:
+        join_tbl := pq.join_table_name
+        join_n_tuples := stats_get_n_tuples(sc, join_tbl)
+
+        # Plan A: outer = tbl (main), inner = join_tbl
+        (inner_a_cost, _) := estimate_scan_cost(sc, join_tbl, "", OP_NONE())
+        plan_a_cost := total_cost + est_rows * inner_a_cost
+
+        # Plan B: outer = join_tbl, inner = tbl (main)
+        join_sel_frac := estimate_selectivity(sc, join_tbl, pq.where_col_name, pq.where_op, pq.where_val)
+        mut join_est_outer := join_n_tuples * join_sel_frac / 10000
+        if join_est_outer < 1:
+            join_est_outer = 1
+        plan_b_cost := inner_a_cost + join_est_outer * total_cost
+
+        # Choose lower cost join order; outer table recorded in table_name, inner in join_tbl
+        mut best_cost := plan_a_cost
+        mut outer_tbl := tbl
+        mut inner_tbl := join_tbl
+        mut outer_rows := est_rows
+        if plan_b_cost < plan_a_cost:
+            best_cost = plan_b_cost
+            outer_tbl = join_tbl
+            inner_tbl = tbl
+            outer_rows = join_est_outer
+
+        mut nlj_est_rows := outer_rows * join_n_tuples / 10
+        if nlj_est_rows < 1:
+            nlj_est_rows = 1
+
+        return plan_node_new(
+            PLAN_NLJ(),
+            outer_tbl,
+            pq.col_names,
+            pq.where_col_name,
+            pq.where_op,
+            pq.where_val,
+            inner_tbl,
+            pq.join_left_col,
+            pq.join_right_col,
+            best_cost,
+            nlj_est_rows
+        )
+
+    # ── Step 4: No join — return scan (+ implicit filter inside scan) ─────────
+    return plan_node_new(
+        scan_type,
+        tbl,
+        pq.col_names,
+        pq.where_col_name,
+        pq.where_op,
+        pq.where_val,
+        "",
+        "",
+        "",
+        total_cost,
+        est_rows
+    )
+
+# ── Plan Explain (human-readable plan string) ─────────────────────────────────
+def explain_plan(plan: PlanNode) -> Str:
+    mut out := ""
+    if plan.node_type == PLAN_SEQSCAN():
+        out = str_concat("SeqScan(", plan.table_name)
+        out = str_concat(out, ")")
+    elif plan.node_type == PLAN_INDEXSCAN():
+        out = str_concat("IndexScan(", plan.table_name)
+        out = str_concat(out, ")")
+    elif plan.node_type == PLAN_NLJ():
+        out = str_concat("NLJ(outer=", plan.table_name)
+        out = str_concat(out, str_concat(", inner=", plan.join_tbl))
+        out = str_concat(out, ")")
+    else:
+        out = "UnknownPlan"
+    out = str_concat(out, str_concat(" cost=", int_to_str(plan.est_cost)))
+    out = str_concat(out, str_concat(" rows~", int_to_str(plan.est_rows)))
+    return out

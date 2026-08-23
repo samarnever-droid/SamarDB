@@ -1,0 +1,309 @@
+# samardb-catalog: Multi-Table System Catalog, Dynamic DDL Engine & Schema Evolution
+# Manages table metadata, column definitions, index registration, and schema transformations.
+
+import bytes
+import schema
+import parser
+
+# ── Catalog Structs ───────────────────────────────────────────────────────────
+struct CatalogTable:
+    table_id:       Int
+    table_name:     Str
+    heap_root_page: Int
+    row_count:      Int
+
+struct CatalogColumn:
+    table_id:    Int
+    col_idx:     Int
+    col_name:    Str
+    data_type:   Int
+    is_pk:       Bool
+    is_nullable: Bool
+
+struct CatalogIndex:
+    index_id:        Int
+    table_id:        Int
+    index_name:      Str
+    key_col_idx:     Int
+    btree_root_page: Int
+
+struct SystemCatalog:
+    next_table_id: Int
+    next_index_id: Int
+    next_page_id:  Int
+    tables:        List[CatalogTable]
+    columns:       List[CatalogColumn]
+    indexes:       List[CatalogIndex]
+
+# ── Catalog Initialization ───────────────────────────────────────────────────
+def catalog_new() -> SystemCatalog:
+    return SystemCatalog(
+        1,
+        1,
+        100, # Start user page allocations at page 100
+        list_new(),
+        list_new(),
+        list_new()
+    )
+
+# ── DDL: CREATE TABLE ─────────────────────────────────────────────────────────
+def catalog_create_table(
+    cat: SystemCatalog,
+    name: Str,
+    col_names: List[Str],
+    col_types: List[Int],
+    pk_idx: Int
+) -> Tuple[SystemCatalog, Int]:
+    tbl_id := cat.next_table_id
+    heap_root := cat.next_page_id
+
+    # Create new tables list
+    mut new_tables := list_new()
+    mut t := 0
+    while t < len(cat.tables):
+        list_push(new_tables, cat.tables[t])
+        t = t + 1
+    list_push(new_tables, CatalogTable(tbl_id, name, heap_root, 0))
+
+    # Append columns
+    mut new_cols := list_new()
+    mut c := 0
+    while c < len(cat.columns):
+        list_push(new_cols, cat.columns[c])
+        c = c + 1
+
+    ncols := len(col_names)
+    mut i := 0
+    while i < ncols:
+        mut is_pk := false
+        if i == pk_idx:
+            is_pk = true
+        list_push(new_cols, CatalogColumn(tbl_id, i, col_names[i], col_types[i], is_pk, !is_pk))
+        i = i + 1
+
+    updated_cat := SystemCatalog(
+        tbl_id + 1,
+        cat.next_index_id,
+        heap_root + 1,
+        new_tables,
+        new_cols,
+        cat.indexes
+    )
+    return (updated_cat, tbl_id)
+
+# ── DDL: DROP TABLE (Cascades to Columns & Indexes) ───────────────────────────
+def catalog_drop_table(cat: SystemCatalog, name: Str) -> Tuple[SystemCatalog, Bool]:
+    mut tbl_id := -1
+    mut i := 0
+    while i < len(cat.tables):
+        if str_eq_ci(cat.tables[i].table_name, name):
+            tbl_id = cat.tables[i].table_id
+        i = i + 1
+
+    if tbl_id < 0:
+        return (cat, false)
+
+    # Filter tables
+    mut new_tables := list_new()
+    mut t := 0
+    while t < len(cat.tables):
+        if cat.tables[t].table_id != tbl_id:
+            list_push(new_tables, cat.tables[t])
+        t = t + 1
+
+    # Filter columns
+    mut new_cols := list_new()
+    mut c := 0
+    while c < len(cat.columns):
+        if cat.columns[c].table_id != tbl_id:
+            list_push(new_cols, cat.columns[c])
+        c = c + 1
+
+    # Filter indexes
+    mut new_idxs := list_new()
+    mut x := 0
+    while x < len(cat.indexes):
+        if cat.indexes[x].table_id != tbl_id:
+            list_push(new_idxs, cat.indexes[x])
+        x = x + 1
+
+    updated_cat := SystemCatalog(
+        cat.next_table_id,
+        cat.next_index_id,
+        cat.next_page_id,
+        new_tables,
+        new_cols,
+        new_idxs
+    )
+    return (updated_cat, true)
+
+# ── DDL: CREATE INDEX ─────────────────────────────────────────────────────────
+def catalog_create_index(
+    cat: SystemCatalog,
+    table_name: Str,
+    index_name: Str,
+    col_name: Str
+) -> Tuple[SystemCatalog, Int]:
+    mut tbl_id := -1
+    mut t := 0
+    while t < len(cat.tables):
+        if str_eq_ci(cat.tables[t].table_name, table_name):
+            tbl_id = cat.tables[t].table_id
+        t = t + 1
+
+    if tbl_id < 0:
+        return (cat, -1)
+
+    # Find column index
+    mut col_idx := -1
+    mut c := 0
+    while c < len(cat.columns):
+        if cat.columns[c].table_id == tbl_id && str_eq_ci(cat.columns[c].col_name, col_name):
+            col_idx = cat.columns[c].col_idx
+        c = c + 1
+
+    if col_idx < 0:
+        return (cat, -1)
+
+    idx_id := cat.next_index_id
+    btree_root := cat.next_page_id
+
+    mut new_idxs := list_new()
+    mut x := 0
+    while x < len(cat.indexes):
+        list_push(new_idxs, cat.indexes[x])
+        x = x + 1
+    list_push(new_idxs, CatalogIndex(idx_id, tbl_id, index_name, col_idx, btree_root))
+
+    updated_cat := SystemCatalog(
+        cat.next_table_id,
+        idx_id + 1,
+        btree_root + 1,
+        cat.tables,
+        cat.columns,
+        new_idxs
+    )
+    return (updated_cat, idx_id)
+
+# ── DDL: DROP INDEX ───────────────────────────────────────────────────────────
+def catalog_drop_index(cat: SystemCatalog, index_name: Str) -> Tuple[SystemCatalog, Bool]:
+    mut found := false
+    mut new_idxs := list_new()
+    mut x := 0
+    while x < len(cat.indexes):
+        if str_eq_ci(cat.indexes[x].index_name, index_name):
+            found = true
+        else:
+            list_push(new_idxs, cat.indexes[x])
+        x = x + 1
+
+    if !found:
+        return (cat, false)
+
+    updated_cat := SystemCatalog(
+        cat.next_table_id,
+        cat.next_index_id,
+        cat.next_page_id,
+        cat.tables,
+        cat.columns,
+        new_idxs
+    )
+    return (updated_cat, true)
+
+# ── DDL: ALTER TABLE ADD COLUMN ───────────────────────────────────────────────
+def catalog_alter_add_column(
+    cat: SystemCatalog,
+    table_name: Str,
+    col_name: Str,
+    data_type: Int,
+    is_nullable: Bool
+) -> Tuple[SystemCatalog, Bool]:
+    mut tbl_id := -1
+    mut t := 0
+    while t < len(cat.tables):
+        if str_eq_ci(cat.tables[t].table_name, table_name):
+            tbl_id = cat.tables[t].table_id
+        t = t + 1
+
+    if tbl_id < 0:
+        return (cat, false)
+
+    # Count existing columns for this table
+    mut max_col_idx := -1
+    mut c := 0
+    while c < len(cat.columns):
+        if cat.columns[c].table_id == tbl_id:
+            if cat.columns[c].col_idx > max_col_idx:
+                max_col_idx = cat.columns[c].col_idx
+        c = c + 1
+
+    new_col_idx := max_col_idx + 1
+
+    mut new_cols := list_new()
+    mut k := 0
+    while k < len(cat.columns):
+        list_push(new_cols, cat.columns[k])
+        k = k + 1
+    list_push(new_cols, CatalogColumn(tbl_id, new_col_idx, col_name, data_type, false, is_nullable))
+
+    updated_cat := SystemCatalog(
+        cat.next_table_id,
+        cat.next_index_id,
+        cat.next_page_id,
+        cat.tables,
+        new_cols,
+        cat.indexes
+    )
+    return (updated_cat, true)
+
+# ── Catalog Lookups ───────────────────────────────────────────────────────────
+def catalog_lookup_table(cat: SystemCatalog, name: Str) -> Tuple[CatalogTable, Bool]:
+    mut i := 0
+    while i < len(cat.tables):
+        if str_eq_ci(cat.tables[i].table_name, name):
+            return (cat.tables[i], true)
+        i = i + 1
+    return (CatalogTable(0, "", 0, 0), false)
+
+def catalog_get_columns_for_table(cat: SystemCatalog, table_id: Int) -> List[CatalogColumn]:
+    mut out := list_new()
+    mut i := 0
+    while i < len(cat.columns):
+        if cat.columns[i].table_id == table_id:
+            list_push(out, cat.columns[i])
+        i = i + 1
+    return out
+
+def catalog_lookup_index_for_col(cat: SystemCatalog, table_id: Int, col_idx: Int) -> Tuple[CatalogIndex, Bool]:
+    mut i := 0
+    while i < len(cat.indexes):
+        if cat.indexes[i].table_id == table_id && cat.indexes[i].key_col_idx == col_idx:
+            return (cat.indexes[i], true)
+        i = i + 1
+    return (CatalogIndex(0, 0, "", 0, 0), false)
+
+# Bridge helper converting catalog metadata into runtime TableSchema
+def catalog_to_table_schema(cat: SystemCatalog, table_name: Str) -> Tuple[TableSchema, Bool]:
+    (tbl, ok) := catalog_lookup_table(cat, table_name)
+    if !ok:
+        return (table_schema_new("", list_new(), list_new(), 0, 0, 0), false)
+
+    cols := catalog_get_columns_for_table(cat, tbl.table_id)
+    mut cnames := list_new()
+    mut ctypes := list_new()
+    mut pk_idx := 0
+    mut i := 0
+    while i < len(cols):
+        list_push(cnames, cols[i].col_name)
+        list_push(ctypes, cols[i].data_type)
+        if cols[i].is_pk:
+            pk_idx = cols[i].col_idx
+        i = i + 1
+
+    (idx, idx_ok) := catalog_lookup_index_for_col(cat, tbl.table_id, pk_idx)
+    mut idx_root := 0
+    if idx_ok:
+        idx_root = idx.btree_root_page
+
+    ts := table_schema_new(tbl.table_name, cnames, ctypes, pk_idx, tbl.heap_root_page, idx_root)
+    return (ts, true)

@@ -1,0 +1,138 @@
+# samardb Phase 15 Test Suite: Double-Write Buffer, Savepoints & Deadlock Safety
+# Asserts DWB torn-page healing, nested savepoint rollback, and cost-based deadlock victim selection.
+
+import bytes
+import io
+import pager
+import heap
+import wal
+import concur
+import chaos
+import safety
+
+# ── Test Reporting Helpers ───────────────────────────────────────────────────
+def assert_bool(name: Str, actual: Bool, expected: Bool) -> Int:
+    if actual == expected:
+        print_str("  [PASS] ")
+        print_str(name)
+        print_str("\n")
+        return 1
+    print_str("  [FAIL] ")
+    print_str(name)
+    print_str("\n")
+    return 0
+
+def assert_int(name: Str, actual: Int, expected: Int) -> Int:
+    if actual == expected:
+        print_str("  [PASS] ")
+        print_str(name)
+        print_str("\n")
+        return 1
+    print_str("  [FAIL] ")
+    print_str(name)
+    print_str("\n")
+    return 0
+
+def test_phase15_safety() -> Int:
+    print_str("================================================================\n")
+    print_str("    SamarDB Phase 15 DWB, Savepoints & Deadlock Safety Suite    \n")
+    print_str("================================================================\n")
+    mut passed := 0
+
+    # ── Test 1: Double-Write Buffer Staging ──────────────────────────────────
+    print_str("--- [1/6] Testing Double-Write Buffer Staging ---\n")
+    mut page := heap_page_init(8192)
+    t1 := bytes_alloc(16)
+    bytes_set64le(t1, 0, 1001)
+    (p1, s0, ok0) := heap_page_insert(page, t1)
+    page = p1
+
+    t2 := bytes_alloc(16)
+    bytes_set64le(t2, 0, 1002)
+    (p2, s1, ok1) := heap_page_insert(page, t2)
+    page = p2
+
+    mut dwb := dwb_manager_new(16)
+    dwb = dwb_stage_write(dwb, 10, page)
+    passed = passed + assert_int("DWB tracked 1 staged page", len(dwb.slots), 1)
+
+    (dwb_copy, found_dwb) := dwb_find_page(dwb, 10)
+    passed = passed + assert_bool("Found page 10 in DWB", found_dwb, true)
+    passed = passed + assert_bool("DWB copy passes CRC32C checksum", page_verify_checksum(dwb_copy), true)
+
+    # ── Test 2: Torn-Write Self-Healing from DWB ──────────────────────────────
+    print_str("--- [2/6] Testing Torn-Write Self-Healing via DWB ---\n")
+    mut disk := sim_disk_new(8192, 50)
+    disk = chaos_inject_torn_write(disk, 10, page)
+
+    torn_page := bytes_alloc(8192)
+    (disk_t, _) := sim_disk_pread(disk, 10, torn_page, 0)
+    passed = passed + assert_bool("Torn page on disk fails CRC32C", page_verify_checksum(torn_page), false)
+
+    # Self-heal page using DWB
+    (healed_disk, is_healed) := dwb_restore_torn_page(disk_t, dwb, 10)
+    passed = passed + assert_bool("DWB torn-page self-healing succeeded", is_healed, true)
+
+    healed_page := bytes_alloc(8192)
+    (disk_h, _) := sim_disk_pread(healed_disk, 10, healed_page, 0)
+    passed = passed + assert_bool("Healed page passes CRC32C validation", page_verify_checksum(healed_page), true)
+
+    (rec_t0, _) := heap_page_read(healed_page, 0)
+    passed = passed + assert_int("Slot 0 restored tuple value is 1001", bytes_get64le(rec_t0, 0), 1001)
+
+    (rec_t1, _) := heap_page_read(healed_page, 1)
+    passed = passed + assert_int("Slot 1 restored tuple value is 1002", bytes_get64le(rec_t1, 0), 1002)
+
+    # ── Test 3: Savepoint Creation & Stack Tracking ───────────────────────────
+    print_str("--- [3/6] Testing Savepoint Creation & Stack Tracking ---\n")
+    mut sm := savepoint_manager_new()
+    (sm1, sp1_id) := savepoint_create(sm, 100, "sp1", 1000, 2)
+    (sm2, sp2_id) := savepoint_create(sm1, 100, "sp2", 1500, 4)
+    sm = sm2
+
+    passed = passed + assert_int("SavepointManager tracks 2 active savepoints", len(sm.savepoints), 2)
+    passed = passed + assert_int("Savepoint 1 id is 1", sp1_id, 1)
+    passed = passed + assert_int("Savepoint 2 id is 2", sp2_id, 2)
+
+    # ── Test 4: Rollback to Savepoint (Partial Undo) ──────────────────────────
+    print_str("--- [4/6] Testing Rollback to Named Savepoint ---\n")
+    (sm_rb, target_lsn, target_mutations, rb_ok) := savepoint_rollback_to(sm, 100, "sp1")
+    passed = passed + assert_bool("Rollback to sp1 succeeds", rb_ok, true)
+    passed = passed + assert_int("Target rollback LSN is 1000", target_lsn, 1000)
+    passed = passed + assert_int("Target mutation count to rewind is 2", target_mutations, 2)
+    passed = passed + assert_int("Newer savepoint sp2 discarded (1 savepoint remains)", len(sm_rb.savepoints), 1)
+
+    # ── Test 5: Release Savepoint ────────────────────────────────────────────
+    print_str("--- [5/6] Testing Release Savepoint ---\n")
+    (sm_rel, rel_ok) := savepoint_release(sm_rb, 100, "sp1")
+    passed = passed + assert_bool("Release sp1 succeeds", rel_ok, true)
+    passed = passed + assert_int("0 active savepoints remain after release", len(sm_rel.savepoints), 0)
+
+    # ── Test 6: Deadlock Victim Selection ────────────────────────────────────
+    print_str("--- [6/6] Testing Cost-Based Deadlock Victim Selection ---\n")
+    mut cycle_txns := list_new()
+    list_push(cycle_txns, 1) # Txn 1
+    list_push(cycle_txns, 2) # Txn 2
+
+    mut txn_costs := list_new()
+    list_push(txn_costs, 50) # Txn 1 has cost 50 (heavy update)
+    list_push(txn_costs, 10) # Txn 2 has cost 10 (lightweight lookup)
+
+    victim := deadlock_select_victim(cycle_txns, txn_costs)
+    passed = passed + assert_bool("Deadlock cycle detected", victim.cycle_detected, true)
+    passed = passed + assert_int("Victim is Txn 2 (cheaper cost)", victim.victim_txn_id, 2)
+    passed = passed + assert_int("Victim cost is 10", victim.victim_cost, 10)
+
+    print_str("================================================================\n")
+    if passed == 20:
+        print_str(" [SUCCESS] All 20 SamarDB Phase 15 Safety Assertions Passed!\n")
+    else:
+        print_str(" [FAILURE] Some Phase 15 assertions failed.\n")
+    print_str("================================================================\n")
+    return passed
+
+def main() -> Int:
+    passed := test_phase15_safety()
+    if passed == 20:
+        return 0
+    return 1

@@ -1,0 +1,396 @@
+# samardb-parser: SQL Tokenizer & Recursive Descent Parser
+# Parses DDL (CREATE TABLE) and DML (INSERT, SELECT, UPDATE, DELETE) into AST representations
+
+import bytes
+
+def QUERY_NONE() -> Int:
+    return 0
+
+def QUERY_SELECT() -> Int:
+    return 1
+
+def QUERY_INSERT() -> Int:
+    return 2
+
+def QUERY_UPDATE() -> Int:
+    return 3
+
+def QUERY_DELETE() -> Int:
+    return 4
+
+def QUERY_CREATE_TABLE() -> Int:
+    return 5
+
+def OP_NONE() -> Int:
+    return 0
+
+def OP_EQ() -> Int:
+    return 1
+
+def OP_NEQ() -> Int:
+    return 2
+
+def OP_LT() -> Int:
+    return 3
+
+def OP_LTE() -> Int:
+    return 4
+
+def OP_GT() -> Int:
+    return 5
+
+def OP_GTE() -> Int:
+    return 6
+
+# ── Parsed Statement AST ─────────────────────────────────────────────────────
+struct ParsedQuery:
+    query_type: Int
+    table_name: Str
+    col_names: List[Str]
+    int_values: List[Int]
+    where_col_name: Str
+    where_op: Int
+    where_val: Int
+    join_table_name: Str
+    join_left_col: Str
+    join_right_col: Str
+
+def parsed_query_empty() -> ParsedQuery:
+    return ParsedQuery(
+        QUERY_NONE(),
+        "",
+        list_new(),
+        list_new(),
+        "",
+        OP_NONE(),
+        0,
+        "",
+        "",
+        ""
+    )
+
+# ── SQL Lexer / Tokenizer ────────────────────────────────────────────────────
+struct TokenList:
+    types: List[Int]
+    texts: List[Str]
+    nums: List[Int]
+
+def token_list_new() -> TokenList:
+    return TokenList(list_new(), list_new(), list_new())
+
+def is_ws_code(o: Int) -> Bool:
+    return o == 32 || o == 9 || o == 10 || o == 13
+
+def is_alpha_code(o: Int) -> Bool:
+    return (o >= 65 && o <= 90) || (o >= 97 && o <= 122) || o == 95
+
+def is_digit_code(o: Int) -> Bool:
+    return o >= 48 && o <= 57
+
+def parse_int_str(s: Str) -> Int:
+    mut res := 0
+    mut i := 0
+    while i < str_len(s):
+        o := ord(char_at(s, i))
+        if is_digit_code(o):
+            res = res * 10 + (o - 48)
+        i = i + 1
+    return res
+
+# Tokenize raw SQL string into TokenList using ASCII integer codes
+def sql_tokenize(sql: Str) -> TokenList:
+    tl := token_list_new()
+    slen := str_len(sql)
+    mut i := 0
+    
+    while i < slen:
+        c := char_at(sql, i)
+        o := ord(c)
+        
+        if is_ws_code(o):
+            i = i + 1
+        elif o == 44: # ,
+            list_push(tl.types, 9)
+            list_push(tl.texts, ",")
+            list_push(tl.nums, 0)
+            i = i + 1
+        elif o == 40: # (
+            list_push(tl.types, 10)
+            list_push(tl.texts, "(")
+            list_push(tl.nums, 0)
+            i = i + 1
+        elif o == 41: # )
+            list_push(tl.types, 11)
+            list_push(tl.texts, ")")
+            list_push(tl.nums, 0)
+            i = i + 1
+        elif o == 42: # *
+            list_push(tl.types, 12)
+            list_push(tl.texts, "*")
+            list_push(tl.nums, 0)
+            i = i + 1
+        elif o == 61: # =
+            list_push(tl.types, 3)
+            list_push(tl.texts, "=")
+            list_push(tl.nums, 0)
+            i = i + 1
+        elif o == 33: # !
+            if i + 1 < slen && ord(char_at(sql, i + 1)) == 61: # !=
+                list_push(tl.types, 8)
+                list_push(tl.texts, "!=")
+                list_push(tl.nums, 0)
+                i = i + 2
+            else:
+                i = i + 1
+        elif o == 60: # <
+            if i + 1 < slen && ord(char_at(sql, i + 1)) == 61: # <=
+                list_push(tl.types, 6)
+                list_push(tl.texts, "<=")
+                list_push(tl.nums, 0)
+                i = i + 2
+            else:
+                list_push(tl.types, 4)
+                list_push(tl.texts, "<")
+                list_push(tl.nums, 0)
+                i = i + 1
+        elif o == 62: # >
+            if i + 1 < slen && ord(char_at(sql, i + 1)) == 61: # >=
+                list_push(tl.types, 7)
+                list_push(tl.texts, ">=")
+                list_push(tl.nums, 0)
+                i = i + 2
+            else:
+                list_push(tl.types, 5)
+                list_push(tl.texts, ">")
+                list_push(tl.nums, 0)
+                i = i + 1
+        elif is_digit_code(o):
+            start_num := i
+            while i < slen && is_digit_code(ord(char_at(sql, i))):
+                i = i + 1
+            num_str := str_substr(sql, start_num, i - start_num)
+            list_push(tl.types, 2)
+            list_push(tl.texts, num_str)
+            list_push(tl.nums, parse_int_str(num_str))
+        elif is_alpha_code(o):
+            start_ident := i
+            while i < slen && (is_alpha_code(ord(char_at(sql, i))) || is_digit_code(ord(char_at(sql, i)))):
+                i = i + 1
+            ident := str_substr(sql, start_ident, i - start_ident)
+            list_push(tl.types, 1)
+            list_push(tl.texts, ident)
+            list_push(tl.nums, 0)
+        else:
+            i = i + 1
+    return tl
+
+# ── SQL Parser ───────────────────────────────────────────────────────────────
+def str_eq_ci(a: Str, b: Str) -> Bool:
+    if str_len(a) != str_len(b):
+        return false
+    mut i := 0
+    while i < str_len(a):
+        mut ca := ord(char_at(a, i))
+        mut cb := ord(char_at(b, i))
+        if ca >= 97 && ca <= 122:
+            ca = ca - 32
+        if cb >= 97 && cb <= 122:
+            cb = cb - 32
+        if ca != cb:
+            return false
+        i = i + 1
+    return true
+
+def parse_where_op(tok_type: Int) -> Int:
+    if tok_type == 3:
+        return OP_EQ()
+    if tok_type == 8:
+        return OP_NEQ()
+    if tok_type == 4:
+        return OP_LT()
+    if tok_type == 6:
+        return OP_LTE()
+    if tok_type == 5:
+        return OP_GT()
+    if tok_type == 7:
+        return OP_GTE()
+    return OP_NONE()
+
+# Parse full SQL string into ParsedQuery
+def sql_parse(sql: Str) -> ParsedQuery:
+    tl := sql_tokenize(sql)
+    ntoks := len(tl.types)
+    if ntoks == 0:
+        return parsed_query_empty()
+        
+    first_text := tl.texts[0]
+    
+    # ── 1. CREATE TABLE ───────────────────────────────────────────────────────
+    if str_eq_ci(first_text, "CREATE") && ntoks >= 4:
+        if str_eq_ci(tl.texts[1], "TABLE"):
+            tbl := tl.texts[2]
+            mut cols := list_new()
+            mut i := 4
+            while i < ntoks:
+                if tl.types[i] == 11:
+                    break
+                if tl.types[i] == 1:
+                    col_name := tl.texts[i]
+                    list_push(cols, col_name)
+                    i = i + 1
+                    if i < ntoks && tl.types[i] == 1:
+                        i = i + 1
+                    if i < ntoks && tl.types[i] == 9:
+                        i = i + 1
+                else:
+                    i = i + 1
+            return ParsedQuery(
+                QUERY_CREATE_TABLE(),
+                tbl,
+                cols,
+                list_new(),
+                "",
+                OP_NONE(),
+                0,
+                "",
+                "",
+                ""
+            )
+            
+    # ── 2. INSERT INTO <tbl> VALUES (<v1>, <v2>, ...) ────────────────────────
+    if str_eq_ci(first_text, "INSERT") && ntoks >= 5:
+        tbl := tl.texts[2]
+        mut vals := list_new()
+        mut i := 4
+        while i < ntoks:
+            if tl.types[i] == 11:
+                break
+            if tl.types[i] == 2:
+                list_push(vals, tl.nums[i])
+                i = i + 1
+                if i < ntoks && tl.types[i] == 9:
+                    i = i + 1
+            else:
+                i = i + 1
+        return ParsedQuery(
+            QUERY_INSERT(),
+            tbl,
+            list_new(),
+            vals,
+            "",
+            OP_NONE(),
+            0,
+            "",
+            "",
+            ""
+        )
+        
+    # ── 3. SELECT <cols> FROM <tbl> [JOIN ...] [WHERE ...] ────────────────────
+    if str_eq_ci(first_text, "SELECT") && ntoks >= 4:
+        mut cols := list_new()
+        mut cur_idx := 1
+        while cur_idx < ntoks && !str_eq_ci(tl.texts[cur_idx], "FROM"):
+            if tl.types[cur_idx] == 1:
+                list_push(cols, tl.texts[cur_idx])
+            elif tl.types[cur_idx] == 12:
+                list_push(cols, "*")
+            cur_idx = cur_idx + 1
+            
+        cur_idx = cur_idx + 1
+        if cur_idx >= ntoks:
+            return parsed_query_empty()
+        tbl := tl.texts[cur_idx]
+        cur_idx = cur_idx + 1
+        
+        mut join_tbl := ""
+        mut join_left := ""
+        mut join_right := ""
+        
+        if cur_idx + 5 < ntoks && str_eq_ci(tl.texts[cur_idx], "JOIN"):
+            join_tbl = tl.texts[cur_idx + 1]
+            join_left = tl.texts[cur_idx + 3]
+            join_right = tl.texts[cur_idx + 5]
+            cur_idx = cur_idx + 6
+            
+        mut where_col := ""
+        mut where_op := OP_NONE()
+        mut where_val := 0
+        
+        if cur_idx + 3 <= ntoks && cur_idx < ntoks && str_eq_ci(tl.texts[cur_idx], "WHERE"):
+            where_col = tl.texts[cur_idx + 1]
+            where_op = parse_where_op(tl.types[cur_idx + 2])
+            if cur_idx + 3 < ntoks:
+                where_val = tl.nums[cur_idx + 3]
+                
+        return ParsedQuery(
+            QUERY_SELECT(),
+            tbl,
+            cols,
+            list_new(),
+            where_col,
+            where_op,
+            where_val,
+            join_tbl,
+            join_left,
+            join_right
+        )
+        
+    # ── 4. UPDATE <tbl> SET <col> = <val> [WHERE <col> <op> <val>] ───────────
+    if str_eq_ci(first_text, "UPDATE") && ntoks >= 6:
+        tbl := tl.texts[1]
+        set_col := tl.texts[3]
+        set_val := tl.nums[5]
+        
+        mut col_list := list_new()
+        list_push(col_list, set_col)
+        mut val_list := list_new()
+        list_push(val_list, set_val)
+        
+        mut where_col := ""
+        mut where_op := OP_NONE()
+        mut where_val := 0
+        
+        if ntoks >= 10 && str_eq_ci(tl.texts[6], "WHERE"):
+            where_col = tl.texts[7]
+            where_op = parse_where_op(tl.types[8])
+            where_val = tl.nums[9]
+            
+        return ParsedQuery(
+            QUERY_UPDATE(),
+            tbl,
+            col_list,
+            val_list,
+            where_col,
+            where_op,
+            where_val,
+            "",
+            "",
+            ""
+        )
+        
+    # ── 5. DELETE FROM <tbl> [WHERE <col> <op> <val>] ────────────────────────
+    if str_eq_ci(first_text, "DELETE") && ntoks >= 3:
+        tbl := tl.texts[2]
+        mut where_col := ""
+        mut where_op := OP_NONE()
+        mut where_val := 0
+        
+        if ntoks >= 7 && str_eq_ci(tl.texts[3], "WHERE"):
+            where_col = tl.texts[4]
+            where_op = parse_where_op(tl.types[5])
+            where_val = tl.nums[6]
+            
+        return ParsedQuery(
+            QUERY_DELETE(),
+            tbl,
+            list_new(),
+            list_new(),
+            where_col,
+            where_op,
+            where_val,
+            "",
+            "",
+            ""
+        )
+        
+    return parsed_query_empty()

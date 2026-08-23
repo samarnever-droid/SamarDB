@@ -1,0 +1,452 @@
+# samardb-raft: Raft Consensus Engine
+# Implements docs/adr/0008-raft-consensus.md
+# Fully deterministic: all state transitions driven through SimNetwork (no OS clocks/sockets).
+# NOTE: L++ has no indexed list assignment. All mutation is via list_push or list rebuild.
+
+import bytes
+
+# ── Role Constants ────────────────────────────────────────────────────────────
+def RAFT_FOLLOWER() -> Int:
+    return 0
+
+def RAFT_CANDIDATE() -> Int:
+    return 1
+
+def RAFT_LEADER() -> Int:
+    return 2
+
+# ── Message Type Constants ────────────────────────────────────────────────────
+def RAFT_MSG_REQUEST_VOTE() -> Int:
+    return 1
+
+def RAFT_MSG_VOTE_REPLY() -> Int:
+    return 2
+
+def RAFT_MSG_APPEND_ENTRIES() -> Int:
+    return 3
+
+def RAFT_MSG_APPEND_REPLY() -> Int:
+    return 4
+
+# ── RaftMessage ───────────────────────────────────────────────────────────────
+struct RaftMessage:
+    msg_type:       Int
+    from_node:      Int
+    to_node:        Int
+    term:           Int
+    candidate_id:   Int
+    last_log_index: Int
+    last_log_term:  Int
+    vote_granted:   Bool
+    leader_id:      Int
+    prev_log_index: Int
+    prev_log_term:  Int
+    leader_commit:  Int
+    entries_count:  Int
+    entry_term:     Int
+    entry_index:    Int
+    entry_data:     Int
+    success:        Bool
+    match_index:    Int
+
+def raft_msg_new() -> RaftMessage:
+    return RaftMessage(0, 0, 0, 0, 0, 0, 0, false, 0, 0, 0, 0, 0, 0, 0, 0, false, 0)
+
+# ── RaftNode ──────────────────────────────────────────────────────────────────
+struct RaftNode:
+    node_id:       Int
+    role:          Int
+    current_term:  Int
+    voted_for:     Int
+    vote_count:    Int
+    commit_index:  Int
+    last_applied:  Int
+    n_peers:       Int
+    next_index:    List[Int]
+    match_index:   List[Int]
+    log_terms:     List[Int]
+    log_data:      List[Int]
+
+def raft_node_new(node_id: Int, n_peers: Int) -> RaftNode:
+    mut ni := list_new()
+    mut mi := list_new()
+    mut p := 0
+    while p < n_peers:
+        list_push(ni, 1)
+        list_push(mi, 0)
+        p = p + 1
+    mut lt := list_new()
+    mut ld := list_new()
+    list_push(lt, 0)
+    list_push(ld, 0)
+    return RaftNode(node_id, RAFT_FOLLOWER(), 0, -1, 0, 0, 0, n_peers, ni, mi, lt, ld)
+
+def raft_node_new_with_role(node_id: Int, role: Int, term: Int, voted_for: Int, vote_count: Int, commit_index: Int, n_peers: Int) -> RaftNode:
+    mut ni := list_new()
+    mut mi := list_new()
+    mut p := 0
+    while p < n_peers:
+        list_push(ni, 1)
+        list_push(mi, 0)
+        p = p + 1
+    mut lt := list_new()
+    mut ld := list_new()
+    list_push(lt, 0)
+    list_push(ld, 0)
+    return RaftNode(node_id, role, term, voted_for, vote_count, commit_index, 0, n_peers, ni, mi, lt, ld)
+
+def raft_log_last_index(node: RaftNode) -> Int:
+    return len(node.log_terms) - 1
+
+def raft_log_last_term(node: RaftNode) -> Int:
+    idx := len(node.log_terms) - 1
+    return node.log_terms[idx]
+
+# ── List-rebuild helpers (no indexed assignment in L++) ───────────────────────
+# Copy a list with one element replaced at position pos
+def list_with_val(src: List[Int], pos: Int, val: Int) -> List[Int]:
+    mut dst := list_new()
+    mut i := 0
+    n := len(src)
+    while i < n:
+        if i == pos:
+            list_push(dst, val)
+        else:
+            list_push(dst, src[i])
+        i = i + 1
+    return dst
+
+# Build a list of n elements all set to val
+def list_of(n: Int, val: Int) -> List[Int]:
+    mut lst := list_new()
+    mut i := 0
+    while i < n:
+        list_push(lst, val)
+        i = i + 1
+    return lst
+
+# Build initial next_index for a new leader (all set to log_last+1)
+def make_leader_next_index(n_peers: Int, new_next: Int, self_id: Int) -> List[Int]:
+    mut ni := list_new()
+    mut p := 0
+    while p < n_peers:
+        if p == self_id:
+            list_push(ni, 1)    # self: doesn't matter
+        else:
+            list_push(ni, new_next)
+        p = p + 1
+    return ni
+
+# ── SimNetwork ────────────────────────────────────────────────────────────────
+# Messages stored as parallel lists; mailboxes per node (3 nodes max for Phase 7).
+struct SimNetwork:
+    msg_types:    List[Int]
+    msg_from:     List[Int]
+    msg_to:       List[Int]
+    msg_terms:    List[Int]
+    msg_cand:     List[Int]
+    msg_lli:      List[Int]
+    msg_llt:      List[Int]
+    msg_vg:       List[Int]   # 1 = granted, 0 = denied
+    msg_lid:      List[Int]
+    msg_pli:      List[Int]
+    msg_plt:      List[Int]
+    msg_lc:       List[Int]
+    msg_ec:       List[Int]
+    msg_et:       List[Int]
+    msg_ei:       List[Int]
+    msg_ed:       List[Int]
+    msg_succ:     List[Int]   # 1 = success, 0 = failure
+    msg_mi:       List[Int]
+    mbox_n0:      List[Int]
+    mbox_n1:      List[Int]
+    mbox_n2:      List[Int]
+    total_sent:   Int
+
+def simnet_new() -> SimNetwork:
+    return SimNetwork(
+        list_new(), list_new(), list_new(), list_new(),
+        list_new(), list_new(), list_new(), list_new(),
+        list_new(), list_new(), list_new(), list_new(),
+        list_new(), list_new(), list_new(), list_new(),
+        list_new(), list_new(),
+        list_new(), list_new(), list_new(),
+        0
+    )
+
+def simnet_enqueue(net: SimNetwork, msg: RaftMessage) -> SimNetwork:
+    idx := net.total_sent
+    list_push(net.msg_types, msg.msg_type)
+    list_push(net.msg_from,  msg.from_node)
+    list_push(net.msg_to,    msg.to_node)
+    list_push(net.msg_terms, msg.term)
+    list_push(net.msg_cand,  msg.candidate_id)
+    list_push(net.msg_lli,   msg.last_log_index)
+    list_push(net.msg_llt,   msg.last_log_term)
+    # vote_granted: push 1 if true, else 0
+    mut vg_int := 0
+    if msg.vote_granted:
+        vg_int = 1
+    list_push(net.msg_vg,    vg_int)
+    list_push(net.msg_lid,   msg.leader_id)
+    list_push(net.msg_pli,   msg.prev_log_index)
+    list_push(net.msg_plt,   msg.prev_log_term)
+    list_push(net.msg_lc,    msg.leader_commit)
+    list_push(net.msg_ec,    msg.entries_count)
+    list_push(net.msg_et,    msg.entry_term)
+    list_push(net.msg_ei,    msg.entry_index)
+    list_push(net.msg_ed,    msg.entry_data)
+    # success: push 1 if true, else 0
+    mut succ_int := 0
+    if msg.success:
+        succ_int = 1
+    list_push(net.msg_succ,  succ_int)
+    list_push(net.msg_mi,    msg.match_index)
+    # Route to destination mailbox
+    if msg.to_node == 0:
+        list_push(net.mbox_n0, idx)
+    elif msg.to_node == 1:
+        list_push(net.mbox_n1, idx)
+    else:
+        list_push(net.mbox_n2, idx)
+    return SimNetwork(
+        net.msg_types, net.msg_from, net.msg_to, net.msg_terms,
+        net.msg_cand, net.msg_lli, net.msg_llt, net.msg_vg,
+        net.msg_lid, net.msg_pli, net.msg_plt, net.msg_lc,
+        net.msg_ec, net.msg_et, net.msg_ei, net.msg_ed,
+        net.msg_succ, net.msg_mi,
+        net.mbox_n0, net.mbox_n1, net.mbox_n2,
+        idx + 1
+    )
+
+def simnet_mailbox_len(net: SimNetwork, node_id: Int) -> Int:
+    if node_id == 0:
+        return len(net.mbox_n0)
+    elif node_id == 1:
+        return len(net.mbox_n1)
+    return len(net.mbox_n2)
+
+def simnet_fetch_msg(net: SimNetwork, idx: Int) -> RaftMessage:
+    vg := net.msg_vg[idx] == 1
+    succ := net.msg_succ[idx] == 1
+    return RaftMessage(
+        net.msg_types[idx], net.msg_from[idx], net.msg_to[idx], net.msg_terms[idx],
+        net.msg_cand[idx], net.msg_lli[idx], net.msg_llt[idx], vg,
+        net.msg_lid[idx], net.msg_pli[idx], net.msg_plt[idx], net.msg_lc[idx],
+        net.msg_ec[idx], net.msg_et[idx], net.msg_ei[idx], net.msg_ed[idx],
+        succ, net.msg_mi[idx]
+    )
+
+# Broadcast RequestVote to all peers
+def simnet_broadcast_rv(net: SimNetwork, node: RaftNode) -> SimNetwork:
+    last_idx := raft_log_last_index(node)
+    last_term := raft_log_last_term(node)
+    mut cur := net
+    mut p := 0
+    while p < node.n_peers:
+        if p != node.node_id:
+            msg := RaftMessage(RAFT_MSG_REQUEST_VOTE(), node.node_id, p, node.current_term, node.node_id, last_idx, last_term, false, 0, 0, 0, 0, 0, 0, 0, 0, false, 0)
+            cur = simnet_enqueue(cur, msg)
+        p = p + 1
+    return cur
+
+# Send AppendEntries to one peer
+def simnet_send_ae(net: SimNetwork, node: RaftNode, peer: Int, has_entry: Bool, entry_data: Int) -> SimNetwork:
+    prev_idx := node.next_index[peer] - 1
+    mut prev_term := 0
+    if prev_idx > 0 && prev_idx < len(node.log_terms):
+        prev_term = node.log_terms[prev_idx]
+    mut ec := 0
+    mut et := 0
+    mut ei := 0
+    mut ed := 0
+    if has_entry:
+        ec = 1
+        et = node.current_term
+        ei = len(node.log_terms)
+        ed = entry_data
+    msg := RaftMessage(RAFT_MSG_APPEND_ENTRIES(), node.node_id, peer, node.current_term, 0, 0, 0, false, node.node_id, prev_idx, prev_term, node.commit_index, ec, et, ei, ed, false, 0)
+    return simnet_enqueue(net, msg)
+
+# ── Election Timer ────────────────────────────────────────────────────────────
+def raft_tick_election(node: RaftNode, net: SimNetwork) -> Tuple[RaftNode, SimNetwork]:
+    new_term := node.current_term + 1
+    new_node := RaftNode(node.node_id, RAFT_CANDIDATE(), new_term, node.node_id, 1, node.commit_index, node.last_applied, node.n_peers, node.next_index, node.match_index, node.log_terms, node.log_data)
+    new_net := simnet_broadcast_rv(net, new_node)
+    return (new_node, new_net)
+
+# ── Handle RequestVote ────────────────────────────────────────────────────────
+def raft_handle_request_vote(node: RaftNode, net: SimNetwork, msg: RaftMessage) -> Tuple[RaftNode, SimNetwork]:
+    mut cur := node
+    if msg.term > node.current_term:
+        cur = RaftNode(node.node_id, RAFT_FOLLOWER(), msg.term, -1, node.vote_count, node.commit_index, node.last_applied, node.n_peers, node.next_index, node.match_index, node.log_terms, node.log_data)
+    mut grant := false
+    if msg.term < cur.current_term:
+        grant = false
+    elif cur.voted_for == -1 || cur.voted_for == msg.candidate_id:
+        my_last_idx := raft_log_last_index(cur)
+        my_last_term := raft_log_last_term(cur)
+        log_ok := (msg.last_log_term > my_last_term) || (msg.last_log_term == my_last_term && msg.last_log_index >= my_last_idx)
+        if log_ok:
+            grant = true
+            cur = RaftNode(cur.node_id, cur.role, cur.current_term, msg.candidate_id, cur.vote_count, cur.commit_index, cur.last_applied, cur.n_peers, cur.next_index, cur.match_index, cur.log_terms, cur.log_data)
+    reply := RaftMessage(RAFT_MSG_VOTE_REPLY(), cur.node_id, msg.from_node, cur.current_term, 0, 0, 0, grant, 0, 0, 0, 0, 0, 0, 0, 0, false, 0)
+    new_net := simnet_enqueue(net, reply)
+    return (cur, new_net)
+
+# ── Handle VoteReply ──────────────────────────────────────────────────────────
+def raft_handle_vote_reply(node: RaftNode, net: SimNetwork, msg: RaftMessage) -> Tuple[RaftNode, SimNetwork]:
+    if msg.term > node.current_term:
+        demoted := RaftNode(node.node_id, RAFT_FOLLOWER(), msg.term, -1, 0, node.commit_index, node.last_applied, node.n_peers, node.next_index, node.match_index, node.log_terms, node.log_data)
+        return (demoted, net)
+    if node.role != RAFT_CANDIDATE():
+        return (node, net)
+    if msg.vote_granted:
+        new_votes := node.vote_count + 1
+        if new_votes * 2 > node.n_peers:
+            # Become leader: build fresh next_index and match_index
+            new_next := raft_log_last_index(node) + 1
+            fresh_ni := make_leader_next_index(node.n_peers, new_next, node.node_id)
+            fresh_mi := list_of(node.n_peers, 0)
+            leader := RaftNode(node.node_id, RAFT_LEADER(), node.current_term, node.voted_for, new_votes, node.commit_index, node.last_applied, node.n_peers, fresh_ni, fresh_mi, node.log_terms, node.log_data)
+            # Send heartbeats to all peers
+            mut cur_net := net
+            mut q := 0
+            while q < leader.n_peers:
+                if q != leader.node_id:
+                    cur_net = simnet_send_ae(cur_net, leader, q, false, 0)
+                q = q + 1
+            return (leader, cur_net)
+        updated := RaftNode(node.node_id, node.role, node.current_term, node.voted_for, new_votes, node.commit_index, node.last_applied, node.n_peers, node.next_index, node.match_index, node.log_terms, node.log_data)
+        return (updated, net)
+    return (node, net)
+
+# ── Heartbeat Timer ───────────────────────────────────────────────────────────
+def raft_tick_heartbeat(node: RaftNode, net: SimNetwork) -> SimNetwork:
+    mut cur := net
+    mut p := 0
+    while p < node.n_peers:
+        if p != node.node_id:
+            cur = simnet_send_ae(cur, node, p, false, 0)
+        p = p + 1
+    return cur
+
+# ── Client Append ─────────────────────────────────────────────────────────────
+def raft_append_command(node: RaftNode, net: SimNetwork, data: Int) -> Tuple[RaftNode, SimNetwork]:
+    # Build new log lists: copy existing entries then append the new one.
+    # (list_push via a struct parameter field does not persist in L++.)
+    n_entries := len(node.log_terms)
+    mut new_lt := list_new()
+    mut new_ld := list_new()
+    mut i := 0
+    while i < n_entries:
+        list_push(new_lt, node.log_terms[i])
+        list_push(new_ld, node.log_data[i])
+        i = i + 1
+    list_push(new_lt, node.current_term)
+    list_push(new_ld, data)
+    upd_node := RaftNode(node.node_id, node.role, node.current_term, node.voted_for, node.vote_count, node.commit_index, node.last_applied, node.n_peers, node.next_index, node.match_index, new_lt, new_ld)
+    mut cur_net := net
+    mut p := 0
+    while p < upd_node.n_peers:
+        if p != upd_node.node_id:
+            cur_net = simnet_send_ae(cur_net, upd_node, p, true, data)
+        p = p + 1
+    return (upd_node, cur_net)
+
+# ── Handle AppendEntries ──────────────────────────────────────────────────────
+def raft_handle_append_entries(node: RaftNode, net: SimNetwork, msg: RaftMessage) -> Tuple[RaftNode, SimNetwork]:
+    mut cur := node
+    if msg.term > node.current_term:
+        cur = RaftNode(node.node_id, RAFT_FOLLOWER(), msg.term, -1, 0, node.commit_index, node.last_applied, node.n_peers, node.next_index, node.match_index, node.log_terms, node.log_data)
+    if msg.term < cur.current_term:
+        reply := RaftMessage(RAFT_MSG_APPEND_REPLY(), cur.node_id, msg.from_node, cur.current_term, 0, 0, 0, false, 0, 0, 0, 0, 0, 0, 0, 0, false, raft_log_last_index(cur))
+        return (cur, simnet_enqueue(net, reply))
+
+    # Log consistency check
+    my_last := raft_log_last_index(cur)
+    mut log_ok := true
+    if msg.prev_log_index > my_last:
+        log_ok = false
+    elif msg.prev_log_index > 0:
+        if cur.log_terms[msg.prev_log_index] != msg.prev_log_term:
+            log_ok = false
+
+    if !log_ok:
+        reply := RaftMessage(RAFT_MSG_APPEND_REPLY(), cur.node_id, msg.from_node, cur.current_term, 0, 0, 0, false, 0, 0, 0, 0, 0, 0, 0, 0, false, my_last)
+        return (cur, simnet_enqueue(net, reply))
+
+    # Accept entries: build new log lists by copying and appending
+    n_existing := len(cur.log_terms)
+    mut new_lt := list_new()
+    mut new_ld := list_new()
+    mut cp := 0
+    while cp < n_existing:
+        list_push(new_lt, cur.log_terms[cp])
+        list_push(new_ld, cur.log_data[cp])
+        cp = cp + 1
+    if msg.entries_count > 0:
+        target_idx := msg.prev_log_index + 1
+        if target_idx >= n_existing:
+            list_push(new_lt, msg.entry_term)
+            list_push(new_ld, msg.entry_data)
+
+    # Advance commit_index
+    mut new_commit := cur.commit_index
+    new_last := len(new_lt) - 1
+    if msg.leader_commit > cur.commit_index:
+        if msg.leader_commit < new_last:
+            new_commit = msg.leader_commit
+        else:
+            new_commit = new_last
+    cur = RaftNode(cur.node_id, RAFT_FOLLOWER(), cur.current_term, cur.voted_for, cur.vote_count, new_commit, cur.last_applied, cur.n_peers, cur.next_index, cur.match_index, new_lt, new_ld)
+    last_appended := len(cur.log_terms) - 1
+    reply := RaftMessage(RAFT_MSG_APPEND_REPLY(), cur.node_id, msg.from_node, cur.current_term, 0, 0, 0, false, 0, 0, 0, 0, 0, 0, 0, 0, true, last_appended)
+    return (cur, simnet_enqueue(net, reply))
+
+# ── Handle AppendReply ────────────────────────────────────────────────────────
+def raft_handle_append_reply(node: RaftNode, net: SimNetwork, msg: RaftMessage) -> Tuple[RaftNode, SimNetwork]:
+    if node.role != RAFT_LEADER():
+        return (node, net)
+    if msg.term > node.current_term:
+        demoted := RaftNode(node.node_id, RAFT_FOLLOWER(), msg.term, -1, 0, node.commit_index, node.last_applied, node.n_peers, node.next_index, node.match_index, node.log_terms, node.log_data)
+        return (demoted, net)
+
+    peer := msg.from_node
+    mut cur := node
+
+    if msg.success:
+        # Rebuild match_index and next_index lists with updated peer entry
+        mut new_match := msg.match_index
+        if cur.match_index[peer] > new_match:
+            new_match = cur.match_index[peer]
+        new_next := new_match + 1
+        upd_mi := list_with_val(cur.match_index, peer, new_match)
+        upd_ni := list_with_val(cur.next_index, peer, new_next)
+        cur = RaftNode(cur.node_id, cur.role, cur.current_term, cur.voted_for, cur.vote_count, cur.commit_index, cur.last_applied, cur.n_peers, upd_ni, upd_mi, cur.log_terms, cur.log_data)
+
+        # Advance commit_index if quorum reached
+        mut n := raft_log_last_index(cur)
+        mut found_quorum := false
+        while n > cur.commit_index && !found_quorum:
+            if cur.log_terms[n] == cur.current_term:
+                mut replicated := 1
+                mut p := 0
+                while p < cur.n_peers:
+                    if p != cur.node_id && cur.match_index[p] >= n:
+                        replicated = replicated + 1
+                    p = p + 1
+                if replicated * 2 > cur.n_peers:
+                    cur = RaftNode(cur.node_id, cur.role, cur.current_term, cur.voted_for, cur.vote_count, n, cur.last_applied, cur.n_peers, cur.next_index, cur.match_index, cur.log_terms, cur.log_data)
+                    found_quorum = true
+            n = n - 1
+    else:
+        # Decrement next_index for peer, floor at 1
+        old_next := cur.next_index[peer]
+        mut new_next_dec := old_next - 1
+        if new_next_dec < 1:
+            new_next_dec = 1
+        upd_ni := list_with_val(cur.next_index, peer, new_next_dec)
+        cur = RaftNode(cur.node_id, cur.role, cur.current_term, cur.voted_for, cur.vote_count, cur.commit_index, cur.last_applied, cur.n_peers, upd_ni, cur.match_index, cur.log_terms, cur.log_data)
+
+    return (cur, net)

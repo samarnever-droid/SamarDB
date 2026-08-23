@@ -1,0 +1,183 @@
+# samardb-pager: Buffer Pool, In-Memory Page Headers, Eviction, and CRC32C Verification
+# Implements Invariant I2 (atomic images) and Invariant I8 (checksum on every read)
+
+import bytes
+import io
+
+# ── Page Header Offsets ──────────────────────────────────────────────────────
+# 0..4   : crc32c
+# 4..12  : lsn (u64)
+# 12..14 : page_type (u16)
+# 14..16 : flags (u16)
+# 16..18 : format_version (u16 = 1)
+# 18..20 : slot_count (u16)
+# 20..22 : lower (u16)
+# 22..24 : upper (u16)
+# 24..28 : special_offset (u32)
+# 28..32 : reserved (u32 = 0)
+
+struct PageHeader:
+    checksum: Int
+    lsn: Int
+    page_type: Int
+    flags: Int
+    format_version: Int
+    slot_count: Int
+    lower: Int
+    upper: Int
+    special_offset: Int
+
+def page_header_decode(b: Bytes) -> PageHeader:
+    c := bytes_get32le(b, 0)
+    lsn := bytes_get64le(b, 4)
+    pt := bytes_get16le(b, 12)
+    fl := bytes_get16le(b, 14)
+    ver := bytes_get16le(b, 16)
+    sc := bytes_get16le(b, 18)
+    low := bytes_get16le(b, 20)
+    up := bytes_get16le(b, 22)
+    sp := bytes_get32le(b, 24)
+    return PageHeader(c, lsn, pt, fl, ver, sc, low, up, sp)
+
+def page_header_encode(b: Bytes, h: PageHeader):
+    bytes_set64le(b, 4, h.lsn)
+    bytes_set16le(b, 12, h.page_type)
+    bytes_set16le(b, 14, h.flags)
+    bytes_set16le(b, 16, h.format_version)
+    bytes_set16le(b, 18, h.slot_count)
+    bytes_set16le(b, 20, h.lower)
+    bytes_set16le(b, 22, h.upper)
+    bytes_set32le(b, 24, h.special_offset)
+    bytes_set32le(b, 28, 0)
+    # Compute CRC32C over bytes [4, page_size)
+    c := bytes_crc32(b, 4, bytes_len(b) - 4)
+    bytes_set32le(b, 0, c)
+
+def page_verify_checksum(b: Bytes) -> Bool:
+    stored := bytes_get32le(b, 0)
+    computed := bytes_crc32(b, 4, bytes_len(b) - 4)
+    return stored == computed
+
+# ── Buffer Frame Descriptor ──────────────────────────────────────────────────
+struct BufferFrame:
+    page_id: Int
+    is_dirty: Bool
+    pin_count: Int
+    data: Bytes
+
+# ── Buffer Pool Manager ──────────────────────────────────────────────────────
+struct BufferPool:
+    frames: List[BufferFrame]
+    pool_size: Int
+    page_size: Int
+    disk: SimDisk
+
+def buffer_pool_new(pool_size: Int, page_size: Int, disk: SimDisk) -> BufferPool:
+    frames := list_new()
+    mut i := 0
+    while i < pool_size:
+        f := BufferFrame(-1, false, 0, bytes_alloc(page_size))
+        list_push(frames, f)
+        i = i + 1
+    return BufferPool(frames, pool_size, page_size, disk)
+
+def buffer_pool_fetch_page(pool: BufferPool, page_id: Int) -> Tuple[BufferPool, Bytes, Bool]:
+    # 1. Search if page is already resident
+    mut i := 0
+    while i < pool.pool_size:
+        f := pool.frames[i]
+        if f.page_id == page_id:
+            # Hit
+            new_frames := list_new()
+            mut k := 0
+            while k < pool.pool_size:
+                if k == i:
+                    list_push(new_frames, BufferFrame(f.page_id, f.is_dirty, f.pin_count + 1, f.data))
+                else:
+                    list_push(new_frames, pool.frames[k])
+                k = k + 1
+            ret_pool := BufferPool(new_frames, pool.pool_size, pool.page_size, pool.disk)
+            return (ret_pool, f.data, true)
+        i = i + 1
+        
+    # 2. Page not resident -> find unpinned victim frame
+    mut victim_idx := -1
+    mut v := 0
+    while v < pool.pool_size:
+        f := pool.frames[v]
+        if f.pin_count == 0:
+            victim_idx = v
+            break
+        v = v + 1
+        
+    if victim_idx == -1:
+        # All frames pinned - cannot evict
+        return (pool, bytes_alloc(0), false)
+        
+    victim := pool.frames[victim_idx]
+    mut cur_disk := pool.disk
+    if victim.is_dirty && victim.page_id >= 0:
+        hdr := page_header_decode(victim.data)
+        page_header_encode(victim.data, hdr)
+        (updated_disk, ok_write) := sim_disk_pwrite(cur_disk, victim.page_id, victim.data, 0)
+        cur_disk = updated_disk
+        
+    # Read incoming page into a newly allocated buffer
+    new_buf := bytes_alloc(pool.page_size)
+    (d_after_read, ok_read) := sim_disk_pread(cur_disk, page_id, new_buf, 0)
+    cur_disk = d_after_read
+    
+    # Verify checksum on formatted pages (Invariant I8)
+    stored_c := bytes_get32le(new_buf, 0)
+    read_lsn := bytes_get64le(new_buf, 4)
+    format_ver := bytes_get16le(new_buf, 16)
+    if stored_c != 0 || read_lsn > 0 || format_ver > 0:
+        if !page_verify_checksum(new_buf):
+            # Bit rot or corrupted page detected!
+            return (BufferPool(pool.frames, pool.pool_size, pool.page_size, cur_disk), new_buf, false)
+        
+    # Update victim frame metadata
+    new_frames := list_new()
+    mut f_idx := 0
+    while f_idx < pool.pool_size:
+        if f_idx == victim_idx:
+            list_push(new_frames, BufferFrame(page_id, false, 1, new_buf))
+        else:
+            list_push(new_frames, pool.frames[f_idx])
+        f_idx = f_idx + 1
+        
+    ret_pool := BufferPool(new_frames, pool.pool_size, pool.page_size, cur_disk)
+    return (ret_pool, new_buf, true)
+
+def buffer_pool_unpin_page(pool: BufferPool, page_id: Int, is_dirty: Bool) -> BufferPool:
+    new_frames := list_new()
+    mut i := 0
+    while i < pool.pool_size:
+        f := pool.frames[i]
+        if f.page_id == page_id:
+            mut new_pin := f.pin_count - 1
+            if new_pin < 0:
+                new_pin = 0
+            list_push(new_frames, BufferFrame(f.page_id, f.is_dirty || is_dirty, new_pin, f.data))
+        else:
+            list_push(new_frames, f)
+        i = i + 1
+    return BufferPool(new_frames, pool.pool_size, pool.page_size, pool.disk)
+
+def buffer_pool_flush_all(pool: BufferPool) -> Tuple[BufferPool, Bool]:
+    mut cur_disk := pool.disk
+    new_frames := list_new()
+    mut i := 0
+    while i < pool.pool_size:
+        f := pool.frames[i]
+        if f.is_dirty && f.page_id >= 0:
+            hdr := page_header_decode(f.data)
+            page_header_encode(f.data, hdr)
+            (updated_disk, ok) := sim_disk_pwrite(cur_disk, f.page_id, f.data, 0)
+            cur_disk = updated_disk
+            list_push(new_frames, BufferFrame(f.page_id, false, f.pin_count, f.data))
+        else:
+            list_push(new_frames, f)
+        i = i + 1
+    (flushed_disk, fsync_ok) := sim_disk_fsync(cur_disk)
+    return (BufferPool(new_frames, pool.pool_size, pool.page_size, flushed_disk), fsync_ok)

@@ -1,0 +1,166 @@
+# samardb Phase 8 Test Suite: Concurrency Control & SSI Engine
+# Verifies: Strict 2PL S/X lock compatibility, lock release/waiter promotion,
+#           deadlock cycle detection, and Cahill SSI Write Skew prevention.
+
+import bytes
+import concur
+
+# ── Test Framework ────────────────────────────────────────────────────────────
+def ci(label: Str, got: Int, want: Int) -> Int:
+    if got == want:
+        print_str(str_concat("  [PASS] ", label))
+        return 1
+    else:
+        out := str_concat("  [FAIL] ", label)
+        out2 := str_concat(out, str_concat("  got=", int_to_str(got)))
+        print_str(str_concat(out2, str_concat(" want=", int_to_str(want))))
+        return 0
+
+def cb(label: Str, got: Bool, want: Bool) -> Int:
+    ok := (got && want) || (!got && !want)
+    if ok:
+        print_str(str_concat("  [PASS] ", label))
+        return 1
+    else:
+        print_str(str_concat("  [FAIL] ", label))
+        return 0
+
+# ── [1/5] 2PL Lock Compatibility ──────────────────────────────────────────────
+def test_2pl_lock_compatibility() -> Int:
+    print_str("--- [1/5] Testing 2PL Lock Compatibility Matrix ---")
+    mut p := 0
+    lt0 := lock_table_new()
+
+    # T1 requests Shared (S) lock on (10, 1) -> GRANTED
+    (lt1, st1) := lock_acquire(lt0, 100, 10, 1, LOCK_SHARED())
+    p = p + ci("T1 acquires S lock on (10, 1): GRANTED", st1, LOCK_STATUS_GRANTED())
+    p = p + cb("T1 holds S lock on (10, 1)", lock_is_held(lt1, 100, 10, 1, LOCK_SHARED()), true)
+
+    # T2 requests Shared (S) lock on (10, 1) -> GRANTED (S and S are compatible)
+    (lt2, st2) := lock_acquire(lt1, 101, 10, 1, LOCK_SHARED())
+    p = p + ci("T2 acquires S lock on (10, 1): GRANTED", st2, LOCK_STATUS_GRANTED())
+    p = p + cb("T2 holds S lock on (10, 1)", lock_is_held(lt2, 101, 10, 1, LOCK_SHARED()), true)
+
+    # T3 requests Exclusive (X) lock on (10, 1) -> BLOCKED (X conflicts with S)
+    (lt3, st3) := lock_acquire(lt2, 102, 10, 1, LOCK_EXCLUSIVE())
+    p = p + ci("T3 acquires X lock on (10, 1): BLOCKED", st3, LOCK_STATUS_BLOCKED())
+    p = p + cb("T3 is waiting for (10, 1)", lock_is_waiting(lt3, 102, 10, 1), true)
+    p = p + cb("T3 does not hold X lock yet", lock_is_held(lt3, 102, 10, 1, LOCK_EXCLUSIVE()), false)
+
+    # T4 requests SIREAD lock on (10, 1) -> GRANTED (SIREAD never blocks)
+    (lt4, st4) := lock_acquire(lt3, 103, 10, 1, LOCK_SIREAD())
+    p = p + ci("T4 acquires SIREAD lock on (10, 1): GRANTED", st4, LOCK_STATUS_GRANTED())
+    return p
+
+# ── [2/5] Lock Release & Waiter Promotion ─────────────────────────────────────
+def test_2pl_lock_release_and_promotion() -> Int:
+    print_str("--- [2/5] Testing 2PL Lock Release & Waiter Promotion ---")
+    mut p := 0
+    lt0 := lock_table_new()
+
+    # T1 acquires Exclusive (X) lock on (20, 5)
+    (lt1, st1) := lock_acquire(lt0, 201, 20, 5, LOCK_EXCLUSIVE())
+    p = p + ci("T1 acquires X lock on (20, 5)", st1, LOCK_STATUS_GRANTED())
+
+    # T2 requests Exclusive (X) lock on (20, 5) -> BLOCKED
+    (lt2, st2) := lock_acquire(lt1, 202, 20, 5, LOCK_EXCLUSIVE())
+    p = p + ci("T2 requests X lock on (20, 5): BLOCKED", st2, LOCK_STATUS_BLOCKED())
+    p = p + cb("T2 is waiting", lock_is_waiting(lt2, 202, 20, 5), true)
+
+    # T1 commits / releases all locks
+    lt_released := lock_release_all(lt2, 201)
+    p = p + cb("T1 no longer holds lock", lock_is_held(lt_released, 201, 20, 5, LOCK_EXCLUSIVE()), false)
+    p = p + cb("T2 promoted: now holds X lock", lock_is_held(lt_released, 202, 20, 5, LOCK_EXCLUSIVE()), true)
+    p = p + cb("T2 is no longer waiting", lock_is_waiting(lt_released, 202, 20, 5), false)
+    return p
+
+# ── [3/5] Deadlock Detection (Wait-For Graph) ──────────────────────────────────
+def test_deadlock_detection() -> Int:
+    print_str("--- [3/5] Testing Deadlock Detection via Wait-For Graph ---")
+    mut p := 0
+    lt0 := lock_table_new()
+
+    # T1 holds X lock on Resource A (30, 1)
+    (lt1, st1) := lock_acquire(lt0, 301, 30, 1, LOCK_EXCLUSIVE())
+    p = p + ci("T1 locks Res A (30, 1): GRANTED", st1, LOCK_STATUS_GRANTED())
+
+    # T2 holds X lock on Resource B (30, 2)
+    (lt2, st2) := lock_acquire(lt1, 302, 30, 2, LOCK_EXCLUSIVE())
+    p = p + ci("T2 locks Res B (30, 2): GRANTED", st2, LOCK_STATUS_GRANTED())
+
+    # T1 requests X lock on Resource B (30, 2) -> BLOCKED (T1 waits for T2)
+    (lt3, st3) := lock_acquire(lt2, 301, 30, 2, LOCK_EXCLUSIVE())
+    p = p + ci("T1 requests Res B: BLOCKED (T1 -> T2)", st3, LOCK_STATUS_BLOCKED())
+
+    # T2 requests X lock on Resource A (30, 1) -> DEADLOCK! (T2 -> T1 creates cycle)
+    (lt4, st4) := lock_acquire(lt3, 302, 30, 1, LOCK_EXCLUSIVE())
+    p = p + ci("T2 requests Res A: DEADLOCK DETECTED", st4, LOCK_STATUS_DEADLOCK())
+    return p
+
+# ── [4/5] SSI Write Skew Prevention (Doctor On-Call) ─────────────────────────
+def test_ssi_write_skew() -> Int:
+    print_str("--- [4/5] Testing SSI Write Skew Prevention (Doctor On-Call) ---")
+    mut p := 0
+    ssi0 := ssi_graph_new()
+
+    # Initial state: Dr. Alice is on tuple (1, 1), Dr. Bob is on tuple (1, 2)
+    # T1 (Alice's transaction) reads both Alice (1, 1) and Bob (1, 2)
+    ssi1 := ssi_register_read(ssi0, 401, 1, 1)
+    ssi2 := ssi_register_read(ssi1, 401, 1, 2)
+
+    # T2 (Bob's transaction) reads both Alice (1, 1) and Bob (1, 2)
+    ssi3 := ssi_register_read(ssi2, 402, 1, 1)
+    ssi4 := ssi_register_read(ssi3, 402, 1, 2)
+
+    # T1 modifies Alice's record (1, 1) to go off-call
+    # This creates rw-antidependency: T2 --rw--> T1
+    (ssi5, anom1) := ssi_register_write(ssi4, 401, 1, 1)
+    p = p + cb("T1 write (1, 1) creates edge T2 -> T1, no anomaly yet", anom1, false)
+    p = p + cb("Edge T2 -> T1 exists in SSI graph", ssi_has_edge(ssi5, 402, 401), true)
+
+    # T2 modifies Bob's record (1, 2) to go off-call
+    # This creates rw-antidependency: T1 --rw--> T2
+    # Combined with T2 --rw--> T1, this forms a 2-cycle -> WRITE SKEW ANOMALY!
+    (ssi6, anom2) := ssi_register_write(ssi5, 402, 1, 2)
+    p = p + cb("T2 write (1, 2) creates edge T1 -> T2 and triggers ANOMALY!", anom2, true)
+    p = p + cb("Edge T1 -> T2 exists in SSI graph", ssi_has_edge(ssi6, 401, 402), true)
+    return p
+
+# ── [5/5] SSI Safe Linear Execution ──────────────────────────────────────────
+def test_ssi_safe_linear_execution() -> Int:
+    print_str("--- [5/5] Testing SSI Safe Linear Serialization ---")
+    mut p := 0
+    ssi0 := ssi_graph_new()
+
+    # T1 reads (5, 1)
+    ssi1 := ssi_register_read(ssi0, 501, 5, 1)
+
+    # T2 writes (5, 1) -> creates T1 --rw--> T2 (no cycle, safe serial order T1 < T2)
+    (ssi2, anom1) := ssi_register_write(ssi1, 502, 5, 1)
+    p = p + cb("Linear read-write dependency: no anomaly", anom1, false)
+
+    # T3 reads (6, 1)
+    ssi3 := ssi_register_read(ssi2, 503, 6, 1)
+
+    # T4 writes (6, 1) -> creates T3 --rw--> T4 (no cycle, safe)
+    (ssi4, anom2) := ssi_register_write(ssi3, 504, 6, 1)
+    p = p + cb("Disjoint linear read-write dependency: no anomaly", anom2, false)
+    return p
+
+def main():
+    print_str("================================================================")
+    print_str("    SamarDB Phase 8 Concurrency Control & SSI Suite            ")
+    print_str("================================================================")
+    p_one := test_2pl_lock_compatibility()
+    p_two := test_2pl_lock_release_and_promotion()
+    p_three := test_deadlock_detection()
+    p_four := test_ssi_write_skew()
+    p_five := test_ssi_safe_linear_execution()
+    total := p_one + p_two + p_three + p_four + p_five
+    print_str("================================================================")
+    if total >= 20:
+        print_str(str_concat(" [SUCCESS] All ", str_concat(int_to_str(total), " SamarDB Phase 8 Concurrency & SSI Assertions Passed!")))
+    else:
+        failed := 20 - total
+        print_str(str_concat(" [FAILED] ", str_concat(int_to_str(failed), str_concat(" failures, ", str_concat(int_to_str(total), " passed")))))
+    print_str("================================================================")

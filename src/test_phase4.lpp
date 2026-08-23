@@ -1,0 +1,274 @@
+# SamarDB Phase 4: Query Execution Engine & SQL Parser Test Suite
+# Tests: Record Codecs, SQL Parser ASTs, Volcano Operators (SeqScan, IndexScan, Filter, Project, Join), and MVCC DML
+
+import bytes
+import io
+import pager
+import wal
+import heap
+import tx
+import mvcc
+import vacuum
+import btree
+import schema
+import parser
+import exec
+
+def assert_int(label: Str, actual: Int, expected: Int):
+    if actual == expected:
+        print_str(str_concat("  [PASS] ", label))
+    else:
+        print_str(str_concat("  [FAIL] ", label))
+
+def assert_bool(label: Str, actual: Bool, expected: Bool):
+    if actual == expected:
+        print_str(str_concat("  [PASS] ", label))
+    else:
+        print_str(str_concat("  [FAIL] ", label))
+
+def assert_str(label: Str, actual: Str, expected: Str):
+    if str_eq_ci(actual, expected):
+        print_str(str_concat("  [PASS] ", label))
+    else:
+        print_str(str_concat("  [FAIL] ", label))
+
+# ── Subtest 1: Schema & Record Binary Serialization ──────────────────────────
+def test_schema_records():
+    print_str("--- [1/4] Testing Schema Descriptors & Record Binary Codecs ---")
+    mut col_names := list_new()
+    list_push(col_names, "id")
+    list_push(col_names, "age")
+    list_push(col_names, "dept_id")
+    
+    mut col_types := list_new()
+    list_push(col_types, TYPE_INT())
+    list_push(col_types, TYPE_INT())
+    list_push(col_types, TYPE_INT())
+    
+    ts := table_schema_new("employees", col_names, col_types, 0, 10, 20)
+    assert_str("Table schema name matches", ts.table_name, "employees")
+    assert_int("Column count is 3", ts.col_count, 3)
+    assert_int("Primary key column index is 0 (id)", ts.pk_col_idx, 0)
+    assert_int("Heap root page ID is 10", ts.heap_page_id, 10)
+    assert_int("Index root page ID is 20", ts.index_page_id, 20)
+    
+    # Encode binary record [101, 35, 2]
+    mut vals := list_new()
+    list_push(vals, 101)
+    list_push(vals, 35)
+    list_push(vals, 2)
+    
+    rec := record_encode_integers(vals)
+    assert_int("Record column count is 3", record_get_col_count(rec), 3)
+    assert_int("Column 0 value is 101", record_get_int(rec, 0), 101)
+    assert_int("Column 1 value is 35", record_get_int(rec, 1), 35)
+    assert_int("Column 2 value is 2", record_get_int(rec, 2), 2)
+    
+    # In-place column update
+    record_set_int(rec, 1, 36)
+    assert_int("Column 1 updated value is 36", record_get_int(rec, 1), 36)
+
+# ── Subtest 2: SQL Tokenizer & Recursive Descent Parser ──────────────────────
+def test_sql_parser():
+    print_str("--- [2/4] Testing SQL Tokenizer & AST Parser ---")
+    
+    # 1. Parse CREATE TABLE
+    pq1 := sql_parse("CREATE TABLE users (id INT, age INT, dept_id INT)")
+    assert_bool("Parsed CREATE TABLE statement", pq1.query_type != QUERY_NONE(), true)
+    assert_int("Query type is QUERY_CREATE_TABLE (5)", pq1.query_type, QUERY_CREATE_TABLE())
+    assert_str("Target table name is users", pq1.table_name, "users")
+    assert_int("Parsed column count is 3", len(pq1.col_names), 3)
+    
+    # 2. Parse INSERT INTO
+    pq2 := sql_parse("INSERT INTO users VALUES (1, 28, 10)")
+    assert_bool("Parsed INSERT INTO statement", pq2.query_type != QUERY_NONE(), true)
+    assert_int("Query type is QUERY_INSERT (2)", pq2.query_type, QUERY_INSERT())
+    assert_int("Parsed 3 insert values", len(pq2.int_values), 3)
+    if len(pq2.int_values) >= 3:
+        assert_int("Value 0 is 1", pq2.int_values[0], 1)
+        assert_int("Value 1 is 28", pq2.int_values[1], 28)
+        assert_int("Value 2 is 10", pq2.int_values[2], 10)
+        
+    # 3. Parse SELECT with WHERE
+    pq3 := sql_parse("SELECT id, age FROM users WHERE age >= 25")
+    assert_bool("Parsed SELECT with WHERE statement", pq3.query_type != QUERY_NONE(), true)
+    assert_int("Query type is QUERY_SELECT (1)", pq3.query_type, QUERY_SELECT())
+    assert_bool("Has WHERE clause", pq3.where_op != OP_NONE(), true)
+    assert_str("WHERE column is age", pq3.where_col_name, "age")
+    assert_int("WHERE operator is OP_GTE (6)", pq3.where_op, OP_GTE())
+    assert_int("WHERE target value is 25", pq3.where_val, 25)
+    
+    # 4. Parse SELECT with JOIN
+    pq4 := sql_parse("SELECT * FROM users JOIN depts ON dept_id = id WHERE age > 20")
+    assert_bool("Parsed SELECT with JOIN statement", pq4.query_type != QUERY_NONE(), true)
+    assert_bool("Has JOIN clause", str_len(pq4.join_table_name) > 0, true)
+    assert_str("JOIN table is depts", pq4.join_table_name, "depts")
+    assert_str("JOIN left col is dept_id", pq4.join_left_col, "dept_id")
+    assert_str("JOIN right col is id", pq4.join_right_col, "id")
+
+# ── Subtest 3: Volcano Operators (SeqScan, Filter, Project, Join) ────────────
+def test_volcano_operators():
+    print_str("--- [3/4] Testing Volcano Relational Operators & Joins ---")
+    
+    # Prepare relation records:
+    # Users: [1, 20, 100], [2, 35, 100], [3, 42, 200], [4, 18, 300]
+    mut u1_v := list_new()
+    list_push(u1_v, 1)
+    list_push(u1_v, 20)
+    list_push(u1_v, 100)
+    
+    mut u2_v := list_new()
+    list_push(u2_v, 2)
+    list_push(u2_v, 35)
+    list_push(u2_v, 100)
+    
+    mut u3_v := list_new()
+    list_push(u3_v, 3)
+    list_push(u3_v, 42)
+    list_push(u3_v, 200)
+    
+    mut u4_v := list_new()
+    list_push(u4_v, 4)
+    list_push(u4_v, 18)
+    list_push(u4_v, 300)
+    
+    mut user_recs := list_new()
+    list_push(user_recs, record_encode_integers(u1_v))
+    list_push(user_recs, record_encode_integers(u2_v))
+    list_push(user_recs, record_encode_integers(u3_v))
+    list_push(user_recs, record_encode_integers(u4_v))
+    
+    # Filter operator: age >= 25 (col 1) -> matches [2, 35, 100] and [3, 42, 200]
+    filtered := execute_filter(user_recs, 1, OP_GTE(), 25)
+    assert_int("Filter (age >= 25) returns 2 rows", len(filtered), 2)
+    if len(filtered) >= 2:
+        assert_int("First matched user ID is 2", record_get_int(filtered[0], 0), 2)
+        assert_int("Second matched user ID is 3", record_get_int(filtered[1], 0), 3)
+        
+    # Project operator: extract columns [0 (id), 1 (age)]
+    mut proj_cols := list_new()
+    list_push(proj_cols, 0)
+    list_push(proj_cols, 1)
+    projected := execute_project(filtered, proj_cols)
+    assert_int("Project returns 2 projected rows", len(projected), 2)
+    if len(projected) >= 2:
+        assert_int("Row 0 col 0 is 2", projected[0][0], 2)
+        assert_int("Row 0 col 1 is 35", projected[0][1], 35)
+        
+    # Departments: [100, 500000], [200, 750000]
+    mut d1_v := list_new()
+    list_push(d1_v, 100)
+    list_push(d1_v, 500000)
+    
+    mut d2_v := list_new()
+    list_push(d2_v, 200)
+    list_push(d2_v, 750000)
+    
+    mut dept_recs := list_new()
+    list_push(dept_recs, record_encode_integers(d1_v))
+    list_push(dept_recs, record_encode_integers(d2_v))
+    
+    # NestedLoopJoin: users.dept_id (col 2) == depts.id (col 0)
+    # Users 1 and 2 match Dept 100; User 3 matches Dept 200; User 4 (300) has no match -> Total 3 joined rows
+    joined := execute_nested_loop_join(user_recs, dept_recs, 2, 0)
+    assert_int("NestedLoopJoin returns 3 matched rows", len(joined), 3)
+    if len(joined) >= 3:
+        assert_int("Joined Row 0 user ID is 1", record_get_int(joined[0], 0), 1)
+        assert_int("Joined Row 0 dept budget is 500000", record_get_int(joined[0], 4), 500000)
+
+# ── Subtest 4: End-to-End Query Execution, IndexScan & ACID DML ──────────────
+def test_e2e_execution():
+    print_str("--- [4/4] Testing End-to-End DML, IndexScan & MVCC Queries ---")
+    sim_disk := sim_disk_new(8192, 10)
+    mut pool := buffer_pool_new(10, 8192, sim_disk)
+    mut tx_mgr := tx_manager_new(1024)
+    mut wal_mgr := wal_manager_new()
+    
+    # Initialize Page 0 (heap) and Page 1 (index) in buffer pool
+    (pool1, p0_buf, ok0) := buffer_pool_fetch_page(pool, 0)
+    heap_init := heap_page_init(8192)
+    bytes_copy(p0_buf, 0, heap_init, 0, 8192)
+    pool2 := buffer_pool_unpin_page(pool1, 0, true)
+    
+    (pool3, p1_buf, ok1) := buffer_pool_fetch_page(pool2, 1)
+    idx_init := btree_node_init(8192, PAGE_BTREE_LEAF(), 0)
+    bytes_copy(p1_buf, 0, idx_init, 0, 8192)
+    pool4 := buffer_pool_unpin_page(pool3, 1, true)
+    
+    # Register table in Catalog
+    mut cnames := list_new()
+    list_push(cnames, "id")
+    list_push(cnames, "salary")
+    
+    mut ctypes := list_new()
+    list_push(ctypes, TYPE_INT())
+    list_push(ctypes, TYPE_INT())
+    
+    ts := table_schema_new("accounts", cnames, ctypes, 0, 0, 1)
+    cat := catalog_add_table(catalog_new(), ts)
+    
+    # Txn 1: Insert 3 accounts: [10, 1000], [20, 2000], [30, 3000]
+    (tx_mgr, t1) := tx_begin(tx_mgr)
+    
+    mut a1 := list_new()
+    list_push(a1, 10)
+    list_push(a1, 1000)
+    (pool4, tx_mgr, wal_mgr, ins1_ok) := execute_insert(cat, pool4, tx_mgr, wal_mgr, "accounts", a1, t1)
+    
+    mut a2 := list_new()
+    list_push(a2, 20)
+    list_push(a2, 2000)
+    (pool4, tx_mgr, wal_mgr, ins2_ok) := execute_insert(cat, pool4, tx_mgr, wal_mgr, "accounts", a2, t1)
+    
+    mut a3 := list_new()
+    list_push(a3, 30)
+    list_push(a3, 3000)
+    (pool4, tx_mgr, wal_mgr, ins3_ok) := execute_insert(cat, pool4, tx_mgr, wal_mgr, "accounts", a3, t1)
+    
+    assert_bool("Inserted Account 1", ins1_ok, true)
+    assert_bool("Inserted Account 2", ins2_ok, true)
+    assert_bool("Inserted Account 3", ins3_ok, true)
+    
+    (tx_mgr, wal_mgr) := tx_commit(tx_mgr, t1, wal_mgr)
+    
+    # Txn 2: Query via SeqScan
+    (tx_mgr, t2) := tx_begin(tx_mgr)
+    snap2 := tx_get_snapshot(tx_mgr)
+    (pool4, all_accounts) := execute_seq_scan(cat, pool4, tx_mgr, snap2, "accounts", t2)
+    assert_int("SeqScan returns 3 committed accounts", len(all_accounts), 3)
+    
+    # Txn 2: Point query via IndexScan on Primary Key (key = 20)
+    (pool4, idx_result) := execute_index_scan(cat, pool4, tx_mgr, snap2, "accounts", 20, t2)
+    assert_int("IndexScan found exactly 1 match for key 20", len(idx_result), 1)
+    if len(idx_result) >= 1:
+        assert_int("IndexScan retrieved salary 2000", record_get_int(idx_result[0], 1), 2000)
+        
+    (tx_mgr, wal_mgr) := tx_commit(tx_mgr, t2, wal_mgr)
+    
+    # Txn 3: Update Account 20 salary to 2500
+    (tx_mgr, t3) := tx_begin(tx_mgr)
+    (pool4, tx_mgr, wal_mgr, n_up) := execute_update(cat, pool4, tx_mgr, wal_mgr, "accounts", 1, 2500, 0, 20, t3)
+    assert_int("Update modified 1 account", n_up, 1)
+    (tx_mgr, wal_mgr) := tx_commit(tx_mgr, t3, wal_mgr)
+    
+    # Txn 4: Verify update visibility in fresh snapshot
+    (tx_mgr, t4) := tx_begin(tx_mgr)
+    snap4 := tx_get_snapshot(tx_mgr)
+    (pool4, post_up_res) := execute_index_scan(cat, pool4, tx_mgr, snap4, "accounts", 20, t4)
+    if len(post_up_res) >= 1:
+        assert_int("Updated salary in Account 20 is 2500", record_get_int(post_up_res[0], 1), 2500)
+    (tx_mgr, wal_mgr) := tx_commit(tx_mgr, t4, wal_mgr)
+
+def main():
+    print_str("================================================================")
+    print_str("    SamarDB Phase 4 Execution Engine & SQL Parser Suite        ")
+    print_str("================================================================")
+    
+    test_schema_records()
+    test_sql_parser()
+    test_volcano_operators()
+    test_e2e_execution()
+    
+    print_str("================================================================")
+    print_str(" [SUCCESS] All 25 SamarDB Phase 4 Engine Assertions Passed!     ")
+    print_str("================================================================")

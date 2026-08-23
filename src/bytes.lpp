@@ -1,0 +1,122 @@
+# Bytes - Safe byte buffer abstraction over buf_* builtins (P0.1)
+# Length-prefixed, bounds-checked, and slice-capable byte buffer
+
+struct Bytes:
+    handle: Int
+    offset: Int
+    length: Int
+
+def bytes_alloc(size: Int) -> Bytes:
+    h := buf_alloc(size)
+    return Bytes(h, 0, size)
+
+def bytes_wrap(handle: Int, offset: Int, length: Int) -> Bytes:
+    return Bytes(handle, offset, length)
+
+def bytes_len(b: Bytes) -> Int:
+    return b.length
+
+def bytes_get8(b: Bytes, pos: Int) -> Int:
+    if pos < 0 || pos >= b.length:
+        return 0
+    return buf_get8(b.handle, b.offset + pos)
+
+def bytes_set8(b: Bytes, pos: Int, val: Int):
+    if pos >= 0 && pos < b.length:
+        buf_set8(b.handle, b.offset + pos, val)
+
+def bytes_get16le(b: Bytes, pos: Int) -> Int:
+    if pos < 0 || pos + 2 > b.length:
+        return 0
+    return buf_get16le(b.handle, b.offset + pos)
+
+def bytes_set16le(b: Bytes, pos: Int, val: Int):
+    if pos >= 0 && pos + 2 <= b.length:
+        buf_set16le(b.handle, b.offset + pos, val)
+
+def bytes_get16be(b: Bytes, pos: Int) -> Int:
+    if pos < 0 || pos + 2 > b.length:
+        return 0
+    b0 := buf_get8(b.handle, b.offset + pos)
+    b1 := buf_get8(b.handle, b.offset + pos + 1)
+    return (b0 * 256) + b1
+
+def bytes_set16be(b: Bytes, pos: Int, val: Int):
+    if pos >= 0 && pos + 2 <= b.length:
+        b0 := (val / 256) % 256
+        b1 := val % 256
+        buf_set8(b.handle, b.offset + pos, b0)
+        buf_set8(b.handle, b.offset + pos + 1, b1)
+
+def bytes_get32le(b: Bytes, pos: Int) -> Int:
+    if pos < 0 || pos + 4 > b.length:
+        return 0
+    return buf_get32le(b.handle, b.offset + pos)
+
+def bytes_set32le(b: Bytes, pos: Int, val: Int):
+    if pos >= 0 && pos + 4 <= b.length:
+        buf_set32le(b.handle, b.offset + pos, val)
+
+def bytes_get32be(b: Bytes, pos: Int) -> Int:
+    if pos < 0 || pos + 4 > b.length:
+        return 0
+    b0 := buf_get8(b.handle, b.offset + pos)
+    b1 := buf_get8(b.handle, b.offset + pos + 1)
+    b2 := buf_get8(b.handle, b.offset + pos + 2)
+    b3 := buf_get8(b.handle, b.offset + pos + 3)
+    return (b0 * 16777216) + (b1 * 65536) + (b2 * 256) + b3
+
+def bytes_set32be(b: Bytes, pos: Int, val: Int):
+    if pos >= 0 && pos + 4 <= b.length:
+        b0 := (val / 16777216) % 256
+        b1 := (val / 65536) % 256
+        b2 := (val / 256) % 256
+        b3 := val % 256
+        buf_set8(b.handle, b.offset + pos, b0)
+        buf_set8(b.handle, b.offset + pos + 1, b1)
+        buf_set8(b.handle, b.offset + pos + 2, b2)
+        buf_set8(b.handle, b.offset + pos + 3, b3)
+
+def bytes_get64le(b: Bytes, pos: Int) -> Int:
+    if pos < 0 || pos + 8 > b.length:
+        return 0
+    return buf_get64le(b.handle, b.offset + pos)
+
+def bytes_set64le(b: Bytes, pos: Int, val: Int):
+    if pos >= 0 && pos + 8 <= b.length:
+        buf_set64le(b.handle, b.offset + pos, val)
+
+def bytes_get64be(b: Bytes, pos: Int) -> Int:
+    if pos < 0 || pos + 8 > b.length:
+        return 0
+    return buf_get64be(b.handle, b.offset + pos)
+
+def bytes_set64be(b: Bytes, pos: Int, val: Int):
+    if pos >= 0 && pos + 8 <= b.length:
+        buf_set64be(b.handle, b.offset + pos, val)
+
+def bytes_slice(b: Bytes, start: Int, slice_len: Int) -> Bytes:
+    if start < 0 || start > b.length:
+        return Bytes(b.handle, b.offset, 0)
+    mut actual_len := slice_len
+    if start + actual_len > b.length:
+        actual_len = b.length - start
+    return Bytes(b.handle, b.offset + start, actual_len)
+
+def bytes_copy(dst: Bytes, dst_off: Int, src: Bytes, src_off: Int, copy_len: Int):
+    if copy_len <= 0:
+        return
+    if dst_off < 0 || dst_off + copy_len > dst.length:
+        return
+    if src_off < 0 || src_off + copy_len > src.length:
+        return
+    buf_copy(dst.handle, dst.offset + dst_off, src.handle, src.offset + src_off, copy_len)
+
+def bytes_crc32(b: Bytes, off: Int, crc_len: Int) -> Int:
+    if off < 0 || off + crc_len > b.length:
+        return 0
+    return buf_crc32(b.handle, b.offset + off, crc_len)
+
+def bytes_free(b: Bytes):
+    if b.offset == 0:
+        buf_free(b.handle)

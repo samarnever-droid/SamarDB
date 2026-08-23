@@ -1,0 +1,225 @@
+# samardb Phase 13 Test Suite: System Catalog, DDL Engine & Schema Evolution
+# Verifies: Dynamic CREATE TABLE, CREATE INDEX, DROP INDEX, ALTER TABLE ADD COLUMN,
+#           Cascading DROP TABLE, and Runtime TableSchema conversion bridge.
+
+import bytes
+import schema
+import parser
+import catalog
+
+# ── Test Framework ────────────────────────────────────────────────────────────
+def ci(label: Str, got: Int, want: Int) -> Int:
+    if got == want:
+        print_str(str_concat("  [PASS] ", label))
+        return 1
+    else:
+        out := str_concat("  [FAIL] ", label)
+        out2 := str_concat(out, str_concat("  got=", int_to_str(got)))
+        print_str(str_concat(out2, str_concat(" want=", int_to_str(want))))
+        return 0
+
+def cb(label: Str, got: Bool, want: Bool) -> Int:
+    ok := (got && want) || (!got && !want)
+    if ok:
+        print_str(str_concat("  [PASS] ", label))
+        return 1
+    else:
+        print_str(str_concat("  [FAIL] ", label))
+        return 0
+
+def cs(label: Str, got: Str, want: Str) -> Int:
+    if str_eq_ci(got, want):
+        print_str(str_concat("  [PASS] ", label))
+        return 1
+    else:
+        print_str(str_concat("  [FAIL] ", label))
+        return 0
+
+# ── [1/5] Dynamic CREATE TABLE DDL ────────────────────────────────────────────
+def test_catalog_table_creation() -> Int:
+    print_str("--- [1/5] Testing Dynamic CREATE TABLE DDL ---")
+    mut p := 0
+    mut cat := catalog_new()
+
+    # 1. CREATE TABLE users (id INT PK, username VARCHAR, is_active BOOL)
+    mut u_cols := list_new()
+    list_push(u_cols, "id")
+    list_push(u_cols, "username")
+    list_push(u_cols, "is_active")
+    mut u_types := list_new()
+    list_push(u_types, TYPE_INT())
+    list_push(u_types, TYPE_VARCHAR())
+    list_push(u_types, TYPE_BOOL())
+    (cat1, u_id) := catalog_create_table(cat, "users", u_cols, u_types, 0)
+    cat = cat1
+
+    p = p + ci("Users table assigned table_id = 1", u_id, 1)
+
+    # 2. CREATE TABLE orders (order_id INT PK, user_id INT, amount INT)
+    mut o_cols := list_new()
+    list_push(o_cols, "order_id")
+    list_push(o_cols, "user_id")
+    list_push(o_cols, "amount")
+    mut o_types := list_new()
+    list_push(o_types, TYPE_INT())
+    list_push(o_types, TYPE_INT())
+    list_push(o_types, TYPE_INT())
+    (cat2, o_id) := catalog_create_table(cat, "orders", o_cols, o_types, 0)
+    cat = cat2
+
+    p = p + ci("Orders table assigned table_id = 2", o_id, 2)
+    p = p + ci("Total registered tables in catalog is 2", len(cat.tables), 2)
+
+    (u_tbl, u_ok) := catalog_lookup_table(cat, "users")
+    p = p + cb("Lookup table 'users' succeeds", u_ok, true)
+    p = p + ci("Users heap root page is 100", u_tbl.heap_root_page, 100)
+
+    (o_tbl, o_ok) := catalog_lookup_table(cat, "orders")
+    p = p + cb("Lookup table 'orders' succeeds", o_ok, true)
+    p = p + ci("Orders heap root page is 101", o_tbl.heap_root_page, 101)
+
+    u_col_list := catalog_get_columns_for_table(cat, u_tbl.table_id)
+    p = p + ci("Users table has exactly 3 columns", len(u_col_list), 3)
+    p = p + cb("Users col 0 is PK", u_col_list[0].is_pk, true)
+    p = p + cb("Users col 1 is not PK", u_col_list[1].is_pk, false)
+    return p
+
+# ── [2/5] Dynamic CREATE & DROP INDEX DDL ─────────────────────────────────────
+def test_catalog_index_lifecycle() -> Int:
+    print_str("--- [2/5] Testing Dynamic CREATE & DROP INDEX DDL ---")
+    mut p := 0
+    mut cat := catalog_new()
+
+    mut u_cols := list_new()
+    list_push(u_cols, "id")
+    list_push(u_cols, "username")
+    list_push(u_cols, "is_active")
+    mut u_types := list_new()
+    list_push(u_types, TYPE_INT())
+    list_push(u_types, TYPE_VARCHAR())
+    list_push(u_types, TYPE_BOOL())
+    (cat1, _) := catalog_create_table(cat, "users", u_cols, u_types, 0)
+    cat = cat1
+
+    # CREATE INDEX users_username_idx ON users(username)
+    (cat2, idx_id) := catalog_create_index(cat, "users", "users_username_idx", "username")
+    cat = cat2
+
+    p = p + ci("Index assigned index_id = 1", idx_id, 1)
+    p = p + ci("Catalog tracks 1 active index", len(cat.indexes), 1)
+
+    (found_idx, idx_ok) := catalog_lookup_index_for_col(cat, 1, 1)
+    p = p + cb("Lookup index on users(username) succeeds", idx_ok, true)
+    p = p + cs("Index name matches", found_idx.index_name, "users_username_idx")
+    p = p + ci("Index btree root is allocated at page 101", found_idx.btree_root_page, 101)
+
+    # DROP INDEX users_username_idx
+    (cat3, drop_ok) := catalog_drop_index(cat, "users_username_idx")
+    cat = cat3
+    p = p + cb("Drop index returns success", drop_ok, true)
+    p = p + ci("Catalog has 0 active indexes after drop", len(cat.indexes), 0)
+
+    (_, idx_after_drop) := catalog_lookup_index_for_col(cat, 1, 1)
+    p = p + cb("Lookup dropped index returns false", idx_after_drop, false)
+    return p
+
+# ── [3/5] Schema Evolution: ALTER TABLE ADD COLUMN ────────────────────────────
+def test_schema_evolution_alter_table() -> Int:
+    print_str("--- [3/5] Testing Schema Evolution (ALTER TABLE ADD COLUMN) ---")
+    mut p := 0
+    mut cat := catalog_new()
+
+    mut u_cols := list_new()
+    list_push(u_cols, "id")
+    list_push(u_cols, "name")
+    mut u_types := list_new()
+    list_push(u_types, TYPE_INT())
+    list_push(u_types, TYPE_VARCHAR())
+    (cat1, _) := catalog_create_table(cat, "accounts", u_cols, u_types, 0)
+    cat = cat1
+
+    # ALTER TABLE accounts ADD COLUMN balance INT
+    (cat2, alter_ok) := catalog_alter_add_column(cat, "accounts", "balance", TYPE_INT(), true)
+    cat = cat2
+    p = p + cb("ALTER TABLE ADD COLUMN balance succeeds", alter_ok, true)
+
+    (tbl, _) := catalog_lookup_table(cat, "accounts")
+    cols := catalog_get_columns_for_table(cat, tbl.table_id)
+    p = p + ci("Accounts table now has 3 columns", len(cols), 3)
+    p = p + cs("Col 2 name is balance", cols[2].col_name, "balance")
+    p = p + ci("Col 2 type is INT", cols[2].data_type, TYPE_INT())
+    p = p + cb("Col 2 is nullable", cols[2].is_nullable, true)
+    return p
+
+# ── [4/5] Cascading DROP TABLE DDL ────────────────────────────────────────────
+def test_cascade_drop_table() -> Int:
+    print_str("--- [4/5] Testing Cascading DROP TABLE DDL ---")
+    mut p := 0
+    mut cat := catalog_new()
+
+    mut o_cols := list_new()
+    list_push(o_cols, "id")
+    list_push(o_cols, "user_id")
+    mut o_types := list_new()
+    list_push(o_types, TYPE_INT())
+    list_push(o_types, TYPE_INT())
+    (cat1, _) := catalog_create_table(cat, "orders", o_cols, o_types, 0)
+    (cat2, _) := catalog_create_index(cat1, "orders", "orders_user_idx", "user_id")
+    cat = cat2
+
+    p = p + ci("Pre-drop tables count is 1", len(cat.tables), 1)
+    p = p + ci("Pre-drop index count is 1", len(cat.indexes), 1)
+
+    # DROP TABLE orders (Cascades to columns & indexes)
+    (cat3, drop_tbl_ok) := catalog_drop_table(cat, "orders")
+    cat = cat3
+    p = p + cb("DROP TABLE orders succeeds", drop_tbl_ok, true)
+    p = p + ci("Post-drop tables count is 0", len(cat.tables), 0)
+    p = p + ci("Post-drop columns count is 0", len(cat.columns), 0)
+    p = p + ci("Post-drop index count is 0 (cascaded)", len(cat.indexes), 0)
+    return p
+
+# ── [5/5] Catalog to TableSchema Runtime Bridge ───────────────────────────────
+def test_catalog_runtime_schema_bridge() -> Int:
+    print_str("--- [5/5] Testing Catalog to TableSchema Runtime Bridge ---")
+    mut p := 0
+    mut cat := catalog_new()
+
+    mut cols := list_new()
+    list_push(cols, "item_id")
+    list_push(cols, "price")
+    list_push(cols, "in_stock")
+    mut types := list_new()
+    list_push(types, TYPE_INT())
+    list_push(types, TYPE_INT())
+    list_push(types, TYPE_BOOL())
+    (cat1, _) := catalog_create_table(cat, "products", cols, types, 0)
+    (cat2, _) := catalog_create_index(cat1, "products", "products_pk_idx", "item_id")
+    cat = cat2
+
+    (ts, bridge_ok) := catalog_to_table_schema(cat, "products")
+    p = p + cb("TableSchema converted from catalog successfully", bridge_ok, true)
+    p = p + cs("TableSchema name is 'products'", ts.table_name, "products")
+    p = p + ci("TableSchema col_count is 3", ts.col_count, 3)
+    p = p + ci("TableSchema pk_col_idx is 0", ts.pk_col_idx, 0)
+    p = p + ci("TableSchema heap_page_id is 100", ts.heap_page_id, 100)
+    p = p + ci("TableSchema index_page_id is 101", ts.index_page_id, 101)
+    return p
+
+def main():
+    print_str("================================================================")
+    print_str("    SamarDB Phase 13 System Catalog & Dynamic DDL Suite        ")
+    print_str("================================================================")
+    p_one := test_catalog_table_creation()
+    p_two := test_catalog_index_lifecycle()
+    p_three := test_schema_evolution_alter_table()
+    p_four := test_cascade_drop_table()
+    p_five := test_catalog_runtime_schema_bridge()
+    total := p_one + p_two + p_three + p_four + p_five
+    print_str("================================================================")
+    if total >= 25:
+        print_str(str_concat(" [SUCCESS] All ", str_concat(int_to_str(total), " SamarDB Phase 13 Catalog & DDL Assertions Passed!")))
+    else:
+        failed := 25 - total
+        print_str(str_concat(" [FAILED] ", str_concat(int_to_str(failed), str_concat(" failures, ", str_concat(int_to_str(total), " passed")))))
+    print_str("================================================================")

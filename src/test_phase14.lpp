@@ -1,0 +1,119 @@
+# samardb Phase 14 Test Suite: Relational Constraints, Foreign Keys & Cascades
+# Asserts NOT NULL, CHECK, UNIQUE, and FOREIGN KEY referential rules with RESTRICT and CASCADE actions.
+
+import bytes
+import schema
+import btree
+import catalog
+import constraints
+
+# ── Test Reporting Helpers ───────────────────────────────────────────────────
+def assert_bool(name: Str, actual: Bool, expected: Bool) -> Int:
+    if actual == expected:
+        print_str("  [PASS] ")
+        print_str(name)
+        print_str("\n")
+        return 1
+    print_str("  [FAIL] ")
+    print_str(name)
+    print_str("\n")
+    return 0
+
+def assert_int(name: Str, actual: Int, expected: Int) -> Int:
+    if actual == expected:
+        print_str("  [PASS] ")
+        print_str(name)
+        print_str("\n")
+        return 1
+    print_str("  [FAIL] ")
+    print_str(name)
+    print_str("\n")
+    return 0
+
+def test_phase14_constraints() -> Int:
+    print_str("================================================================\n")
+    print_str("    SamarDB Phase 14 Constraints & Foreign Keys Test Suite     \n")
+    print_str("================================================================\n")
+    mut passed := 0
+
+    # ── Test 1: NOT NULL Constraint Validation ───────────────────────────────
+    print_str("--- [1/6] Testing NOT NULL Constraint Validation ---\n")
+    passed = passed + assert_bool("NOT NULL accepts valid present value", constraint_validate_not_null(false), true)
+    passed = passed + assert_bool("NOT NULL rejects null value", constraint_validate_not_null(true), false)
+
+    # ── Test 2: CHECK Range Constraint Validation ────────────────────────────
+    print_str("--- [2/6] Testing CHECK Range Constraint Validation ---\n")
+    mut cm := constraint_manager_new()
+    check_sal := CheckConstraint(1, "chk_salary_range", 1, 2, 1000, 50000)
+    cm = constraint_add_check(cm, check_sal)
+
+    passed = passed + assert_int("Total registered CHECK constraints is 1", len(cm.checks), 1)
+    passed = passed + assert_bool("CHECK allows valid salary 25000", constraint_validate_check(cm, 1, 2, 25000), true)
+    passed = passed + assert_bool("CHECK rejects below minimum salary 500", constraint_validate_check(cm, 1, 2, 500), false)
+    passed = passed + assert_bool("CHECK rejects above maximum salary 80000", constraint_validate_check(cm, 1, 2, 80000), false)
+
+    # ── Test 3: UNIQUE / Primary Key Collision Validation ────────────────────
+    print_str("--- [3/6] Testing UNIQUE Constraint Collision Validation ---\n")
+    mut existing_pks := list_new()
+    list_push(existing_pks, 101)
+    list_push(existing_pks, 102)
+    list_push(existing_pks, 103)
+
+    passed = passed + assert_bool("UNIQUE allows novel key 104", constraint_validate_unique(existing_pks, 104), true)
+    passed = passed + assert_bool("UNIQUE rejects duplicate key 102", constraint_validate_unique(existing_pks, 102), false)
+
+    # ── Test 4: Foreign Key Insertion Referential Validation ─────────────────
+    print_str("--- [4/6] Testing Foreign Key Insertion Validation ---\n")
+    fk_orders_user := ForeignKey(1, "fk_orders_user_id", 2, 1, 1, 0, FK_ACTION_RESTRICT())
+    cm = constraint_add_fk(cm, fk_orders_user)
+
+    mut parent_user_ids := list_new()
+    list_push(parent_user_ids, 1)
+    list_push(parent_user_ids, 2)
+    list_push(parent_user_ids, 3)
+
+    passed = passed + assert_bool("FK allows child insert referencing existing parent user_id 2", constraint_validate_fk_insert(cm, 2, 1, 2, parent_user_ids), true)
+    passed = passed + assert_bool("FK rejects child insert with orphaned parent user_id 99", constraint_validate_fk_insert(cm, 2, 1, 99, parent_user_ids), false)
+
+    # ── Test 5: ON DELETE RESTRICT Action ────────────────────────────────────
+    print_str("--- [5/6] Testing ON DELETE RESTRICT Referential Action ---\n")
+    mut child_fks := list_new()
+    list_push(child_fks, 1) # Order 0 -> User 1
+    list_push(child_fks, 2) # Order 1 -> User 2
+    list_push(child_fks, 2) # Order 2 -> User 2
+
+    (act_restrict, affected_r, can_proceed_r) := constraint_evaluate_delete(cm, 1, 2, 2, child_fks)
+    passed = passed + assert_bool("RESTRICT blocks parent deletion when child orders exist", can_proceed_r, false)
+    passed = passed + assert_int("Action code is RESTRICT (1)", act_restrict, 1)
+    passed = passed + assert_int("Matched 2 dependent child rows", len(affected_r), 2)
+
+    (act_free, affected_f, can_proceed_f) := constraint_evaluate_delete(cm, 1, 3, 2, child_fks)
+    passed = passed + assert_bool("RESTRICT allows parent deletion when zero children exist", can_proceed_f, true)
+    passed = passed + assert_int("Zero dependent child rows affected", len(affected_f), 0)
+
+    # ── Test 6: ON DELETE CASCADE Action ─────────────────────────────────────
+    print_str("--- [6/6] Testing ON DELETE CASCADE Referential Action ---\n")
+    mut cm_cascade := constraint_manager_new()
+    fk_cascade := ForeignKey(2, "fk_orders_cascade", 2, 1, 1, 0, FK_ACTION_CASCADE())
+    cm_cascade = constraint_add_fk(cm_cascade, fk_cascade)
+
+    (act_cascade, affected_c, can_proceed_c) := constraint_evaluate_delete(cm_cascade, 1, 2, 2, child_fks)
+    passed = passed + assert_bool("CASCADE permits parent deletion", can_proceed_c, true)
+    passed = passed + assert_int("Action code is CASCADE (2)", act_cascade, 2)
+    passed = passed + assert_int("CASCADE flags 2 dependent rows for deletion", len(affected_c), 2)
+    passed = passed + assert_int("First cascaded child index is 1", affected_c[0], 1)
+    passed = passed + assert_int("Second cascaded child index is 2", affected_c[1], 2)
+
+    print_str("================================================================\n")
+    if passed == 20:
+        print_str(" [SUCCESS] All 20 SamarDB Phase 14 Constraints Assertions Passed!\n")
+    else:
+        print_str(" [FAILURE] Some Phase 14 assertions failed.\n")
+    print_str("================================================================\n")
+    return passed
+
+def main() -> Int:
+    passed := test_phase14_constraints()
+    if passed == 20:
+        return 0
+    return 1

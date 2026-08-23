@@ -1,0 +1,189 @@
+# samardb-schema: Relational Table Schema, Column Descriptors & Binary Record Serialization
+# Implements docs/format/record.md layout (v1)
+
+import bytes
+
+def TYPE_INT() -> Int:
+    return 1
+
+def TYPE_VARCHAR() -> Int:
+    return 2
+
+def TYPE_BOOL() -> Int:
+    return 3
+
+# ── Column Descriptor ────────────────────────────────────────────────────────
+struct Column:
+    name: Str
+    data_type: Int
+    is_pk: Bool
+    is_nullable: Bool
+
+def column_new(name: Str, data_type: Int, is_pk: Bool, is_nullable: Bool) -> Column:
+    return Column(name, data_type, is_pk, is_nullable)
+
+# ── Table Schema Descriptor ──────────────────────────────────────────────────
+struct TableSchema:
+    table_name: Str
+    col_count: Int
+    col_names: List[Str]
+    col_types: List[Int]
+    pk_col_idx: Int
+    heap_page_id: Int
+    index_page_id: Int
+
+def table_schema_new(
+    name: Str,
+    col_names: List[Str],
+    col_types: List[Int],
+    pk_idx: Int,
+    heap_page_id: Int,
+    index_page_id: Int
+) -> TableSchema:
+    return TableSchema(name, len(col_names), col_names, col_types, pk_idx, heap_page_id, index_page_id)
+
+# ── Record Binary Codecs ─────────────────────────────────────────────────────
+# User Payload Layout:
+# 0..2                : col_count (u16)
+# 2..4                : null_bitmap (u16)
+# 4..4+(col_count*2)  : col_offsets (u16[])
+# 4+(col_count*2)..end: column data area
+
+def record_encode_integers(col_values: List[Int]) -> Bytes:
+    ncols := len(col_values)
+    header_len := 4 + (ncols * 2)
+    total_len := header_len + (ncols * 8)
+    
+    b := bytes_alloc(total_len)
+    bytes_set16le(b, 0, ncols)
+    bytes_set16le(b, 2, 0) # null_bitmap = 0
+    
+    mut cur_data_off := header_len
+    mut i := 0
+    while i < ncols:
+        # Write offset for column i
+        bytes_set16le(b, 4 + (i * 2), cur_data_off)
+        # Write 64-bit integer data
+        bytes_set64le(b, cur_data_off, col_values[i])
+        cur_data_off = cur_data_off + 8
+        i = i + 1
+    return b
+
+# Multi-type variable-length record encoder supporting INT, VARCHAR, BOOL, and NULL
+def record_encode_mixed(
+    col_types: List[Int],
+    int_vals: List[Int],
+    str_vals: List[Str],
+    bool_vals: List[Bool],
+    null_mask: Int
+) -> Bytes:
+    ncols := len(col_types)
+    header_len := 4 + (ncols * 2)
+    
+    # Calculate required payload length
+    mut payload_size := 0
+    mut i := 0
+    while i < ncols:
+        # Check if bit i in null_mask is set
+        mut is_null := false
+        mut bit_check := 1
+        mut s := 0
+        while s < i:
+            bit_check = bit_check * 2
+            s = s + 1
+        if (null_mask / bit_check) % 2 == 1:
+            is_null = true
+
+        if !is_null:
+            t := col_types[i]
+            if t == TYPE_INT():
+                payload_size = payload_size + 8
+            elif t == TYPE_BOOL():
+                payload_size = payload_size + 1
+            elif t == TYPE_VARCHAR():
+                s_len := str_len(str_vals[i])
+                payload_size = payload_size + 2 + s_len
+        i = i + 1
+
+    total_len := header_len + payload_size
+    b := bytes_alloc(total_len)
+    bytes_set16le(b, 0, ncols)
+    bytes_set16le(b, 2, null_mask)
+
+    mut cur_data_off := header_len
+    mut j := 0
+    while j < ncols:
+        bytes_set16le(b, 4 + (j * 2), cur_data_off)
+        mut is_col_null := false
+        mut bit_val := 1
+        mut b_idx := 0
+        while b_idx < j:
+            bit_val = bit_val * 2
+            b_idx = b_idx + 1
+        if (null_mask / bit_val) % 2 == 1:
+            is_col_null = true
+
+        if !is_col_null:
+            col_t := col_types[j]
+            if col_t == TYPE_INT():
+                bytes_set64le(b, cur_data_off, int_vals[j])
+                cur_data_off = cur_data_off + 8
+            elif col_t == TYPE_BOOL():
+                mut b_byte := 0
+                if bool_vals[j]:
+                    b_byte = 1
+                bytes_set8(b, cur_data_off, b_byte)
+                cur_data_off = cur_data_off + 1
+            elif col_t == TYPE_VARCHAR():
+                s_val := str_vals[j]
+                slen := str_len(s_val)
+                bytes_set16le(b, cur_data_off, slen)
+                mut c := 0
+                while c < slen:
+                    bytes_set8(b, cur_data_off + 2 + c, ord(char_at(s_val, c)))
+                    c = c + 1
+                cur_data_off = cur_data_off + 2 + slen
+        j = j + 1
+    return b
+
+def record_get_col_count(rec: Bytes) -> Int:
+    return bytes_get16le(rec, 0)
+
+def record_is_null(rec: Bytes, col_idx: Int) -> Bool:
+    ncols := bytes_get16le(rec, 0)
+    if col_idx < 0 || col_idx >= ncols:
+        return true
+    null_mask := bytes_get16le(rec, 2)
+    mut bit_check := 1
+    mut s := 0
+    while s < col_idx:
+        bit_check = bit_check * 2
+        s = s + 1
+    return (null_mask / bit_check) % 2 == 1
+
+def record_get_int(rec: Bytes, col_idx: Int) -> Int:
+    if record_is_null(rec, col_idx):
+        return 0
+    off := bytes_get16le(rec, 4 + (col_idx * 2))
+    return bytes_get64le(rec, off)
+
+def record_set_int(rec: Bytes, col_idx: Int, val: Int):
+    ncols := bytes_get16le(rec, 0)
+    if col_idx >= 0 && col_idx < ncols:
+        off := bytes_get16le(rec, 4 + (col_idx * 2))
+        bytes_set64le(rec, off, val)
+
+def record_get_bool(rec: Bytes, col_idx: Int) -> Bool:
+    if record_is_null(rec, col_idx):
+        return false
+    off := bytes_get16le(rec, 4 + (col_idx * 2))
+    return bytes_get8(rec, off) != 0
+
+def record_get_varchar_len(rec: Bytes, col_idx: Int) -> Int:
+    if record_is_null(rec, col_idx):
+        return 0
+    off := bytes_get16le(rec, 4 + (col_idx * 2))
+    return bytes_get16le(rec, off)
+
+def record_matches_int(rec: Bytes, col_idx: Int, expected_val: Int) -> Bool:
+    return record_get_int(rec, col_idx) == expected_val

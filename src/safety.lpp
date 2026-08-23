@@ -1,0 +1,165 @@
+# samardb-safety: Double-Write Buffer (DWB), Savepoints & Deadlock Victim Selection
+# Implements hardware-level torn-page write immunity, nested subtransaction savepoints,
+# and cost-based deadlock cycle resolution.
+
+import bytes
+import io
+import pager
+import heap
+import wal
+import concur
+import parser
+
+# ── Double-Write Buffer (DWB) Structures ───────────────────────────────────────
+struct DwbSlot:
+    slot_id:        Int
+    target_page_id: Int
+    lsn:            Int
+    checksum:       Int
+    handle:         Int
+
+struct DwbManager:
+    capacity: Int
+    slots:    List[DwbSlot]
+
+def dwb_manager_new(capacity: Int) -> DwbManager:
+    return DwbManager(capacity, list_new())
+
+# Stage a dirty 8KB page into the Double-Write Buffer before main table write
+def dwb_stage_write(dwb: DwbManager, target_page_id: Int, page_data: Bytes) -> DwbManager:
+    hdr := page_header_decode(page_data)
+    stored_c := bytes_get32le(page_data, 0)
+    slot_id := len(dwb.slots)
+    
+    # Store a persistent cloned buffer handle
+    clone_buf := bytes_alloc(8192)
+    bytes_copy(clone_buf, 0, page_data, 0, 8192)
+    new_slot := DwbSlot(slot_id, target_page_id, hdr.lsn, stored_c, clone_buf.handle)
+
+    mut new_slots := list_new()
+    mut i := 0
+    n := len(dwb.slots)
+    while i < n:
+        # If page already in DWB, replace it with latest version
+        if dwb.slots[i].target_page_id != target_page_id:
+            list_push(new_slots, dwb.slots[i])
+        i = i + 1
+    list_push(new_slots, new_slot)
+    return DwbManager(dwb.capacity, new_slots)
+
+# Search DWB for a valid backup copy of a page
+def dwb_find_page(dwb: DwbManager, target_page_id: Int) -> Tuple[Bytes, Bool]:
+    mut i := 0
+    n := len(dwb.slots)
+    while i < n:
+        slot := dwb.slots[i]
+        if slot.target_page_id == target_page_id:
+            page_buf := bytes_wrap(slot.handle, 0, 8192)
+            if page_verify_checksum(page_buf):
+                return (page_buf, true)
+        i = i + 1
+    return (bytes_alloc(0), false)
+
+# Restore a torn / corrupted page on disk using the Double-Write Buffer
+def dwb_restore_torn_page(disk: SimDisk, dwb: DwbManager, page_id: Int) -> Tuple[SimDisk, Bool]:
+    (dwb_page, found) := dwb_find_page(dwb, page_id)
+    if !found:
+        return (disk, false)
+        
+    # Write the pristine DWB copy directly into the target disk page
+    (updated_disk, ok_w) := sim_disk_pwrite(disk, page_id, dwb_page, 0)
+    return (updated_disk, ok_w)
+
+# ── Savepoints & Subtransactions Structures ───────────────────────────────────
+struct Savepoint:
+    savepoint_id:      Int
+    name:              Str
+    txn_id:            Int
+    lsn_at_savepoint:  Int
+    mutation_count:    Int
+
+struct SavepointManager:
+    savepoints: List[Savepoint]
+
+def savepoint_manager_new() -> SavepointManager:
+    return SavepointManager(list_new())
+
+# Create a new savepoint inside an active transaction
+def savepoint_create(mgr: SavepointManager, txn_id: Int, name: Str, cur_lsn: Int, mutation_count: Int) -> Tuple[SavepointManager, Int]:
+    sp_id := len(mgr.savepoints) + 1
+    sp := Savepoint(sp_id, name, txn_id, cur_lsn, mutation_count)
+    
+    mut new_sps := list_new()
+    mut i := 0
+    n := len(mgr.savepoints)
+    while i < n:
+        list_push(new_sps, mgr.savepoints[i])
+        i = i + 1
+    list_push(new_sps, sp)
+    return (SavepointManager(new_sps), sp_id)
+
+# Rollback to a named savepoint: returns target LSN and mutation count to rewind to
+def savepoint_rollback_to(mgr: SavepointManager, txn_id: Int, name: Str) -> Tuple[SavepointManager, Int, Int, Bool]:
+    mut target_idx := -1
+    mut target_lsn := 0
+    mut target_mutations := 0
+    
+    mut i := 0
+    n := len(mgr.savepoints)
+    while i < n:
+        sp := mgr.savepoints[i]
+        if sp.txn_id == txn_id && str_eq_ci(sp.name, name):
+            target_idx = i
+            target_lsn = sp.lsn_at_savepoint
+            target_mutations = sp.mutation_count
+        i = i + 1
+        
+    if target_idx == -1:
+        return (mgr, 0, 0, false) # Savepoint not found
+        
+    # Retain all savepoints up to target_idx, discard newer ones
+    mut retained := list_new()
+    mut j := 0
+    while j <= target_idx:
+        list_push(retained, mgr.savepoints[j])
+        j = j + 1
+    return (SavepointManager(retained), target_lsn, target_mutations, true)
+
+# Release / destroy a named savepoint
+def savepoint_release(mgr: SavepointManager, txn_id: Int, name: Str) -> Tuple[SavepointManager, Bool]:
+    mut found := false
+    mut new_sps := list_new()
+    mut i := 0
+    n := len(mgr.savepoints)
+    while i < n:
+        sp := mgr.savepoints[i]
+        if sp.txn_id == txn_id && str_eq_ci(sp.name, name):
+            found = true
+        else:
+            list_push(new_sps, sp)
+        i = i + 1
+    return (SavepointManager(new_sps), found)
+
+# ── Deadlock Victim Selection ──────────────────────────────────────────────────
+struct DeadlockVictim:
+    victim_txn_id:  Int
+    victim_cost:    Int
+    cycle_detected: Bool
+
+# Given a list of transactions in a deadlock cycle and their corresponding costs,
+# selects the transaction with the LOWEST cost as the victim to abort.
+def deadlock_select_victim(cycle_txns: List[Int], txn_costs: List[Int]) -> DeadlockVictim:
+    n := len(cycle_txns)
+    if n == 0:
+        return DeadlockVictim(0, 0, false)
+        
+    mut min_idx := 0
+    mut min_cost := txn_costs[0]
+    mut i := 1
+    while i < n:
+        if txn_costs[i] < min_cost:
+            min_cost = txn_costs[i]
+            min_idx = i
+        i = i + 1
+        
+    return DeadlockVictim(cycle_txns[min_idx], min_cost, true)

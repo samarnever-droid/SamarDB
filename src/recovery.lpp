@@ -1,0 +1,123 @@
+# samardb-recovery: Crash Recovery Engine
+# Implements Invariant I6 (idempotence of REDO) and Invariant I1 (durability)
+
+import bytes
+import io
+import pager
+import wal
+import heap
+
+struct RecoveryStats:
+    records_scanned: Int
+    records_applied: Int
+    records_skipped: Int
+    checkpoints_found: Int
+
+def recovery_stats_new() -> RecoveryStats:
+    return RecoveryStats(0, 0, 0, 0)
+
+# REDO pass over WAL records into the buffer pool
+# Asserts and maintains Invariant I6: if page.lsn >= record.lsn, the record is skipped
+def recovery_redo_scan(pool: BufferPool, wal_records: List[Bytes]) -> Tuple[BufferPool, RecoveryStats]:
+    mut cur_pool := pool
+    mut scanned := 0
+    mut applied := 0
+    mut skipped := 0
+    mut chk_count := 0
+    
+    mut i := 0
+    while i < len(wal_records):
+        rec_buf := wal_records[i]
+        (rec, ok) := wal_record_decode(rec_buf)
+        if ok:
+            scanned = scanned + 1
+            if rec.rec_type == 4: # HEAP_INSERT
+                # Payload format: page_id: u32 (0..3), tuple_data: bytes (4..len)
+                if rec.payload_len >= 4:
+                    page_id := bytes_get32le(rec.payload, 0)
+                    tuple_data := bytes_slice(rec.payload, 4, rec.payload_len - 4)
+                    
+                    # Fetch page from buffer pool
+                    (p_after_fetch, page_buf, fetch_ok) := buffer_pool_fetch_page(cur_pool, page_id)
+                    cur_pool = p_after_fetch
+                    
+                    if fetch_ok:
+                        hdr := page_header_decode(page_buf)
+                        # Invariant I6: Idempotent REDO check
+                        if rec.lsn > hdr.lsn:
+                            # Apply tuple insert
+                            (updated_page, slot_id, ins_ok) := heap_page_insert(page_buf, tuple_data)
+                            if ins_ok:
+                                # Update page LSN to record LSN
+                                upd_hdr := page_header_decode(updated_page)
+                                final_hdr := PageHeader(
+                                    0,
+                                    rec.lsn,
+                                    upd_hdr.page_type,
+                                    upd_hdr.flags,
+                                    upd_hdr.format_version,
+                                    upd_hdr.slot_count,
+                                    upd_hdr.lower,
+                                    upd_hdr.upper,
+                                    upd_hdr.special_offset
+                                )
+                                page_header_encode(updated_page, final_hdr)
+                                cur_pool = buffer_pool_unpin_page(cur_pool, page_id, true)
+                                applied = applied + 1
+                            else:
+                                cur_pool = buffer_pool_unpin_page(cur_pool, page_id, false)
+                        else:
+                            # Already on disk / page LSN is equal or newer -> idempotent skip
+                            cur_pool = buffer_pool_unpin_page(cur_pool, page_id, false)
+                            skipped = skipped + 1
+            elif rec.rec_type == 5: # HEAP_UPDATE
+                if rec.payload_len >= 6:
+                    page_id := bytes_get32le(rec.payload, 0)
+                    slot_id := bytes_get16le(rec.payload, 4)
+                    new_tuple_data := bytes_slice(rec.payload, 6, rec.payload_len - 6)
+                    (p_after_fetch, page_buf, fetch_ok) := buffer_pool_fetch_page(cur_pool, page_id)
+                    cur_pool = p_after_fetch
+                    if fetch_ok:
+                        hdr := page_header_decode(page_buf)
+                        if rec.lsn > hdr.lsn:
+                            # Delete existing slot and insert new version
+                            (del_page, del_ok) := heap_page_delete(page_buf, slot_id)
+                            (upd_page, new_s, ins_ok) := heap_page_insert(del_page, new_tuple_data)
+                            if ins_ok:
+                                upd_hdr := page_header_decode(upd_page)
+                                final_hdr := PageHeader(0, rec.lsn, upd_hdr.page_type, upd_hdr.flags, upd_hdr.format_version, upd_hdr.slot_count, upd_hdr.lower, upd_hdr.upper, upd_hdr.special_offset)
+                                page_header_encode(upd_page, final_hdr)
+                                cur_pool = buffer_pool_unpin_page(cur_pool, page_id, true)
+                                applied = applied + 1
+                            else:
+                                cur_pool = buffer_pool_unpin_page(cur_pool, page_id, false)
+                        else:
+                            cur_pool = buffer_pool_unpin_page(cur_pool, page_id, false)
+                            skipped = skipped + 1
+            elif rec.rec_type == 6: # HEAP_DELETE
+                if rec.payload_len >= 6:
+                    page_id := bytes_get32le(rec.payload, 0)
+                    slot_id := bytes_get16le(rec.payload, 4)
+                    (p_after_fetch, page_buf, fetch_ok) := buffer_pool_fetch_page(cur_pool, page_id)
+                    cur_pool = p_after_fetch
+                    if fetch_ok:
+                        hdr := page_header_decode(page_buf)
+                        if rec.lsn > hdr.lsn:
+                            (del_page, del_ok) := heap_page_delete(page_buf, slot_id)
+                            if del_ok:
+                                upd_hdr := page_header_decode(del_page)
+                                final_hdr := PageHeader(0, rec.lsn, upd_hdr.page_type, upd_hdr.flags, upd_hdr.format_version, upd_hdr.slot_count, upd_hdr.lower, upd_hdr.upper, upd_hdr.special_offset)
+                                page_header_encode(del_page, final_hdr)
+                                cur_pool = buffer_pool_unpin_page(cur_pool, page_id, true)
+                                applied = applied + 1
+                            else:
+                                cur_pool = buffer_pool_unpin_page(cur_pool, page_id, false)
+                        else:
+                            cur_pool = buffer_pool_unpin_page(cur_pool, page_id, false)
+                            skipped = skipped + 1
+            elif rec.rec_type == 10: # CHECKPOINT
+                chk_count = chk_count + 1
+        i = i + 1
+        
+    stats := RecoveryStats(scanned, applied, skipped, chk_count)
+    return (cur_pool, stats)

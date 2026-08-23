@@ -1,0 +1,220 @@
+# samardb Phase 6 Test Suite: PostgreSQL Wire Protocol (`pgwire`)
+# Verifies: SimSocket framing, all 7 server message types,
+#           startup handshake, query message reader, and end-to-end session.
+
+import bytes
+import schema
+import parser
+import exec
+import opt
+import pgwire
+
+# ── Test Framework ────────────────────────────────────────────────────────────
+def ci(label: Str, got: Int, want: Int) -> Int:
+    if got == want:
+        print_str(str_concat("  [PASS] ", label))
+        return 1
+    else:
+        out := str_concat("  [FAIL] ", label)
+        out2 := str_concat(out, str_concat("  got=", int_to_str(got)))
+        print_str(str_concat(out2, str_concat(" want=", int_to_str(want))))
+        return 0
+
+def cb(label: Str, got: Bool, want: Bool) -> Int:
+    ok := (got && want) || (!got && !want)
+    if ok:
+        print_str(str_concat("  [PASS] ", label))
+        return 1
+    else:
+        print_str(str_concat("  [FAIL] ", label))
+        return 0
+
+def cs(label: Str, got: Str, want: Str) -> Int:
+    if str_eq_ci(got, want):
+        print_str(str_concat("  [PASS] ", label))
+        return 1
+    else:
+        out := str_concat("  [FAIL] ", label)
+        out2 := str_concat(out, str_concat("  got='", got))
+        print_str(str_concat(out2, str_concat("' want='", str_concat(want, "'"))))
+        return 0
+
+# ── [1/4] SimSocket Frame Primitives ─────────────────────────────────────────
+def test_simsock_primitives() -> Int:
+    print_str("--- [1/4] Testing SimSocket Frame Primitives ---")
+    mut p := 0
+    base := simsock_new()
+
+    # Write byte → read back
+    s_a := pgwire_write_byte(base, 65)   # 'A'
+    p = p + ci("write_byte out_pos advanced by 1", s_a.out_pos, 1)
+    p = p + ci("write_byte value at pos 0 is 65 ('A')", pgwire_out_read_byte(s_a, 0), 65)
+
+    # Write Int32 BE 0x12345678 = 305419896
+    s_b := pgwire_write_int32be(s_a, 305419896)
+    p = p + ci("write_int32be out_pos advanced by 4", s_b.out_pos, 5)
+    p = p + ci("write_int32be MSB byte is 0x12=18", pgwire_out_read_byte(s_b, 1), 18)
+    p = p + ci("write_int32be byte 2 is 0x34=52", pgwire_out_read_byte(s_b, 2), 52)
+    p = p + ci("write_int32be roundtrip", pgwire_out_read_int32be(s_b, 1), 305419896)
+
+    # Write Int16 BE 1000
+    s_c := pgwire_write_int16be(s_b, 1000)
+    p = p + ci("write_int16be out_pos advanced by 2", s_c.out_pos, 7)
+    p = p + ci("write_int16be roundtrip", pgwire_out_read_int16be(s_c, 5), 1000)
+
+    # Write null-terminated string "hi"
+    s_d := pgwire_write_str(s_c, "hi")
+    p = p + ci("write_str out_pos advanced by 3 (h+i+null)", s_d.out_pos, 10)
+    p = p + ci("write_str first char 'h' = 104", pgwire_out_read_byte(s_d, 7), 104)
+    p = p + ci("write_str second char 'i' = 105", pgwire_out_read_byte(s_d, 8), 105)
+    p = p + ci("write_str null terminator = 0", pgwire_out_read_byte(s_d, 9), 0)
+    return p
+
+# ── [2/4] Server Message Encoding ────────────────────────────────────────────
+def test_message_encoding() -> Int:
+    print_str("--- [2/4] Testing Server Message Frame Encoding ---")
+    mut p := 0
+
+    # AuthenticationOK: R(82) + length=8 + auth_type=0  →  9 bytes total
+    s_auth := pgwire_send_auth_ok(simsock_new())
+    p = p + ci("AuthOK type byte is 'R' (82)", pgwire_out_read_byte(s_auth, 0), 82)
+    p = p + ci("AuthOK length field is 8", pgwire_out_read_int32be(s_auth, 1), 8)
+    p = p + ci("AuthOK auth_type is 0", pgwire_out_read_int32be(s_auth, 5), 0)
+    p = p + ci("AuthOK frame is 9 bytes", s_auth.out_pos, 9)
+
+    # BackendKeyData: K(75) + length=12 + pid + key  →  13 bytes
+    s_bkd := pgwire_send_backend_key(s_auth, 42, 99999)
+    p = p + ci("BackendKeyData type 'K' (75)", pgwire_out_read_byte(s_bkd, 9), 75)
+    p = p + ci("BackendKeyData length is 12", pgwire_out_read_int32be(s_bkd, 10), 12)
+    p = p + ci("BackendKeyData pid is 42", pgwire_out_read_int32be(s_bkd, 14), 42)
+    p = p + ci("BackendKeyData key is 99999", pgwire_out_read_int32be(s_bkd, 18), 99999)
+    p = p + ci("BackendKeyData ends at byte 22", s_bkd.out_pos, 22)
+
+    # ReadyForQuery: Z(90) + length=5 + 'I'(73)  →  6 bytes
+    s_rfq := pgwire_send_ready_for_query(s_bkd, 73)
+    p = p + ci("ReadyForQuery type 'Z' (90)", pgwire_out_read_byte(s_rfq, 22), 90)
+    p = p + ci("ReadyForQuery length is 5", pgwire_out_read_int32be(s_rfq, 23), 5)
+    p = p + ci("ReadyForQuery status 'I' (73)", pgwire_out_read_byte(s_rfq, 27), 73)
+
+    # CommandComplete: C(67) + length + "SELECT 5\0"
+    s_cc := pgwire_send_command_complete(simsock_new(), "SELECT 5")
+    p = p + ci("CommandComplete type 'C' (67)", pgwire_out_read_byte(s_cc, 0), 67)
+    # length = 4 (len field) + 8 ("SELECT 5") + 1 (null) = 13
+    p = p + ci("CommandComplete length is 13", pgwire_out_read_int32be(s_cc, 1), 13)
+    p = p + cs("CommandComplete tag is SELECT 5", pgwire_out_read_str(s_cc, 5), "SELECT 5")
+
+    # ErrorResponse: E(69) + length + 'S' + "ERROR\0" + 'M' + message\0 + '\0'
+    s_err := pgwire_send_error(simsock_new(), "syntax error")
+    p = p + ci("ErrorResponse type 'E' (69)", pgwire_out_read_byte(s_err, 0), 69)
+    p = p + ci("ErrorResponse field 'S' (83) at pos 5", pgwire_out_read_byte(s_err, 5), 83)
+    p = p + cs("ErrorResponse severity value is ERROR", pgwire_out_read_str(s_err, 6), "ERROR")
+    return p
+
+# ── [3/4] Startup Handshake ───────────────────────────────────────────────────
+def test_startup_and_query() -> Int:
+    print_str("--- [3/4] Testing Startup Handshake & Query Message Framing ---")
+    mut p := 0
+
+    # Build a valid startup message in the SimSocket in_buf
+    # [length(4)][proto_major=3(2)][proto_minor=0(2)][user\0samardb\0database\0samardb\0\0]
+    mut sock := simsock_new()
+    params_key := "user"
+    user_val := "samardb"
+    db_key := "database"
+    db_val := "samardb"
+    param_len := str_len(params_key) + 1 + str_len(user_val) + 1 + str_len(db_key) + 1 + str_len(db_val) + 1 + 1
+    total_startup_len := 4 + 4 + param_len
+
+    sock = simsock_client_write_int32be(sock, 0, total_startup_len)
+    sock = simsock_client_write_int16be(sock, 4, 3)    # proto_major = 3
+    sock = simsock_client_write_int16be(sock, 6, 0)    # proto_minor = 0
+    mut w := 8
+    w = simsock_client_write_str(sock, w, params_key)
+    w = simsock_client_write_str(sock, w, user_val)
+    w = simsock_client_write_str(sock, w, db_key)
+    w = simsock_client_write_str(sock, w, db_val)
+    simsock_client_write_byte(sock, w, 0)              # double-null terminator
+
+    # Do startup handshake; verify all 3 server frames
+    (s_ok, ok) := pgwire_do_startup(sock)
+    p = p + cb("Startup handshake succeeded", ok, true)
+    p = p + ci("Handshake: AuthOK type 'R' (82) at byte 0", pgwire_out_read_byte(s_ok, 0), 82)
+    p = p + ci("Handshake: BackendKeyData type 'K' (75) at byte 9", pgwire_out_read_byte(s_ok, 9), 75)
+    p = p + ci("Handshake: ReadyForQuery type 'Z' (90) at byte 22", pgwire_out_read_byte(s_ok, 22), 90)
+    p = p + ci("Handshake: ReadyForQuery status 'I' (73) at byte 27", pgwire_out_read_byte(s_ok, 27), 73)
+    # AuthOK(9) + BackendKeyData(13) + ReadyForQuery(6) = 28 bytes
+    p = p + ci("Handshake: exactly 28 bytes sent", s_ok.out_pos, 28)
+
+    # Bad proto version (proto_major=2) → ErrorResponse + returns false
+    mut sock2 := simsock_new()
+    sock2 = simsock_client_write_int32be(sock2, 0, 12)
+    sock2 = simsock_client_write_int16be(sock2, 4, 2)   # proto_major=2 (invalid)
+    sock2 = simsock_client_write_int16be(sock2, 6, 0)
+    simsock_client_write_byte(sock2, 8, 0)              # empty params terminator
+    (s_bad, ok_bad) := pgwire_do_startup(sock2)
+    p = p + cb("Bad proto version returns false", ok_bad, false)
+    p = p + ci("Bad proto: ErrorResponse type 'E' (69)", pgwire_out_read_byte(s_bad, 0), 69)
+    return p
+
+# ── [4/4] RowDescription + DataRow + CommandComplete ─────────────────────────
+def test_row_description_and_data_rows() -> Int:
+    print_str("--- [4/4] Testing RowDescription, DataRow & CommandComplete Frames ---")
+    mut p := 0
+
+    mut cnames := list_new()
+    list_push(cnames, "id")
+    list_push(cnames, "salary")
+    mut ctypes := list_new()
+    list_push(ctypes, PG_OID_INT4())    # 23
+    list_push(ctypes, PG_OID_INT4())    # 23
+
+    # RowDescription: T(84) + ncols=2 + col descriptors
+    s_rd := pgwire_send_row_description(simsock_new(), cnames, ctypes)
+    p = p + ci("RowDescription type 'T' (84) at byte 0", pgwire_out_read_byte(s_rd, 0), 84)
+    p = p + ci("RowDescription ncols = 2 at byte 5", pgwire_out_read_int16be(s_rd, 5), 2)
+    # col 0 name "id" starts at byte 7
+    p = p + cs("RowDescription col 0 name is 'id'", pgwire_out_read_str(s_rd, 7), "id")
+    # after "id\0" (3 bytes) = pos 10: table_oid(4) + col_attnum(2) + type_oid(4)
+    # col 0 OID at offset 7+3+4+2=16? Let's verify: 7=name_start, 7+2+1=10 after null, then 4+2=6 → OID at 10+6=16? No:
+    # 10: table_oid bytes 10..13; col_attnum bytes 14..15; type_oid bytes 16..19
+    p = p + ci("RowDescription col 0 OID=23 (int4) at byte 16", pgwire_out_read_int32be(s_rd, 16), 23)
+    p = p + cb("RowDescription frame > 20 bytes", s_rd.out_pos > 20, true)
+
+    # DataRow: D(68) + ncols=2 + [len=1, "5"] + [len=4, "2000"]
+    mut row_vals := list_new()
+    list_push(row_vals, 5)
+    list_push(row_vals, 2000)
+    dr_start := s_rd.out_pos
+    s_dr := pgwire_send_data_row(s_rd, row_vals, 2)
+    p = p + ci("DataRow type 'D' (68)", pgwire_out_read_byte(s_dr, dr_start), 68)
+    p = p + ci("DataRow ncols = 2", pgwire_out_read_int16be(s_dr, dr_start + 5), 2)
+    # col 0: len(4 bytes) at dr_start+7, value at dr_start+11
+    p = p + ci("DataRow col 0 value len = 1", pgwire_out_read_int32be(s_dr, dr_start + 7), 1)
+    p = p + ci("DataRow col 0 value '5' = ASCII 53", pgwire_out_read_byte(s_dr, dr_start + 11), 53)
+    # col 1: len(4 bytes) at dr_start+12, value at dr_start+16
+    p = p + ci("DataRow col 1 value len = 4", pgwire_out_read_int32be(s_dr, dr_start + 12), 4)
+    p = p + ci("DataRow col 1 first char '2' = ASCII 50", pgwire_out_read_byte(s_dr, dr_start + 16), 50)
+
+    # CommandComplete: C(67) + length + "SELECT 2\0"
+    cc_start := s_dr.out_pos
+    s_cc := pgwire_send_command_complete(s_dr, "SELECT 2")
+    p = p + ci("CommandComplete type 'C' (67)", pgwire_out_read_byte(s_cc, cc_start), 67)
+    p = p + cs("CommandComplete tag is 'SELECT 2'", pgwire_out_read_str(s_cc, cc_start + 5), "SELECT 2")
+    return p
+
+def main():
+    print_str("================================================================")
+    print_str("    SamarDB Phase 6 PostgreSQL Wire Protocol Suite             ")
+    print_str("================================================================")
+    p_one := test_simsock_primitives()
+    p_two := test_message_encoding()
+    p_three := test_startup_and_query()
+    p_four := test_row_description_and_data_rows()
+    total := p_one + p_two + p_three + p_four
+    print_str("================================================================")
+    if total >= 25:
+        print_str(str_concat(" [SUCCESS] All ", str_concat(int_to_str(total), " SamarDB Phase 6 Wire Protocol Assertions Passed!")))
+    else:
+        failed := 25 - total
+        print_str(str_concat(" [FAILED] ", str_concat(int_to_str(failed), str_concat(" failures, ", str_concat(int_to_str(total), " passed")))))
+    print_str("================================================================")
