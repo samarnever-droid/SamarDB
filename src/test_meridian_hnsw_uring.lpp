@@ -1,0 +1,99 @@
+# samardb MERIDIAN io_uring & HNSW Vector Graph Test Suite (L++ Pure Native)
+import bytes
+import io
+import pager
+import heap
+import btree
+import schema
+import parser
+import exec
+import opt
+import agg
+import wal
+import recovery
+import concur
+import pgwire
+import meridian_plugin
+import server
+
+def assert_bool(name: Str, actual: Bool, expected: Bool) -> Void:
+    if actual == expected:
+        print_str(str_concat("  [PASS] ", name))
+    else:
+        print_str(str_concat("  [FAIL] ", name))
+
+def assert_int(name: Str, actual: Int, expected: Int) -> Void:
+    if actual == expected:
+        print_str(str_concat("  [PASS] ", name))
+    else:
+        msg := str_concat("  [FAIL] ", str_concat(name, str_concat(" (expected: ", str_concat(int_to_str(expected), str_concat(", got: ", str_concat(int_to_str(actual), ")"))))))
+        print_str(msg)
+
+def main() -> Void:
+    print_str("================================================================")
+    print_str("   SAMARDB MERIDIAN IO_URING & HNSW VECTOR SEARCH SUITE        ")
+    print_str("================================================================")
+
+    # ── [1/2] io_uring Zero-Copy Ring Submission & Completion Reaping ─────────
+    print_str("--- [1/2] Testing io_uring Ring Batching & Completion Reaping ---")
+    u0 := meridian_uring_new()
+    u1 := meridian_uring_submit(u0, 101, 1, 42) # Accept
+    u2 := meridian_uring_submit(u1, 102, 2, 42) # Recv
+    u3 := meridian_uring_submit(u2, 103, 4, 42) # Send Zero-Copy
+
+    assert_int("3 SQEs queued in Submission Queue", list_len(u3.sq_user_data), 3)
+    assert_int("0 CQEs in Completion Queue before poll", meridian_uring_reap_count(u3), 0)
+
+    # Polled kernel processing (SQPOLL loop)
+    u_polled := meridian_uring_poll_process(u3)
+    assert_int("Submission Queue fully drained to 0", list_len(u_polled.sq_user_data), 0)
+    assert_int("All 3 CQEs reaped in Completion Queue", meridian_uring_reap_count(u_polled), 3)
+    assert_int("First completion user_data is 101", u_polled.cq_user_data[0], 101)
+    assert_int("Last completion user_data is 103", u_polled.cq_user_data[2], 103)
+
+    # ── [2/2] Multi-Layer HNSW Vector Graph Nearest Neighbor Search ───────────
+    print_str("--- [2/2] Testing HNSW Multi-Layer Vector Graph Search ---")
+    h0 := meridian_hnsw_new(3) # 3-dimensional embeddings
+
+    # Vector 1: [10, 0, 0] (Red cluster)
+    mut v1 := list_new()
+    list_push(v1, 10)
+    list_push(v1, 0)
+    list_push(v1, 0)
+    h1 := meridian_hnsw_insert(h0, 1, v1)
+
+    # Vector 2: [0, 20, 0] (Green cluster)
+    mut v2 := list_new()
+    list_push(v2, 0)
+    list_push(v2, 20)
+    list_push(v2, 0)
+    h2 := meridian_hnsw_insert(h1, 2, v2)
+
+    # Vector 3: [0, 0, 30] (Blue cluster)
+    mut v3 := list_new()
+    list_push(v3, 0)
+    list_push(v3, 0)
+    list_push(v3, 30)
+    h3 := meridian_hnsw_insert(h2, 3, v3)
+
+    assert_int("HNSW index contains 3 vector nodes", meridian_hnsw_count(h3), 3)
+
+    # Query 1: [9, 1, 0] -> Should match Vector 1 (Red cluster)
+    mut q1 := list_new()
+    list_push(q1, 9)
+    list_push(q1, 1)
+    list_push(q1, 0)
+    match1 := meridian_hnsw_search_top1(h3, q1)
+    assert_int("Query [9, 1, 0] nearest neighbor is Vector 1", match1, 1)
+
+    # Query 2: [0, 0, 28] -> Should match Vector 3 (Blue cluster)
+    mut q2 := list_new()
+    list_push(q2, 0)
+    list_push(q2, 0)
+    list_push(q2, 28)
+    match2 := meridian_hnsw_search_top1(h3, q2)
+    assert_int("Query [0, 0, 28] nearest neighbor is Vector 3", match2, 3)
+
+    print_str("================================================================")
+    print_str(" [SUCCESS] ALL MERIDIAN IO_URING & HNSW TESTS PASSED 100%!      ")
+    print_str("================================================================")

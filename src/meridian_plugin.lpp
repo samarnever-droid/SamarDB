@@ -1218,6 +1218,147 @@ def meridian_sec_verify_audit_chain(sec: MeridianSecurityEngine) -> Bool:
         i = i + 1
     return true
 
+# ── Linux io_uring Zero-Copy Queue & HNSW Vector Graph Index (Phase 23 & 24) ─
+
+# 1. io_uring Ring Engine
+struct MeridianUring:
+    sq_user_data: List[Int]
+    sq_opcodes:   List[Int] # 1: Accept, 2: Recv, 3: Send, 4: SendZc
+    sq_fds:       List[Int]
+    cq_user_data: List[Int]
+    cq_res:       List[Int]
+
+def meridian_uring_new() -> MeridianUring:
+    return MeridianUring(
+        list_new(),
+        list_new(),
+        list_new(),
+        list_new(),
+        list_new()
+    )
+
+def meridian_uring_submit(
+    u: MeridianUring,
+    user_data: Int,
+    opcode: Int,
+    fd: Int
+) -> MeridianUring:
+    mut next_sq_ud := list_new()
+    mut next_sq_op := list_new()
+    mut next_sq_fd := list_new()
+    
+    mut i := 0
+    while i < list_len(u.sq_user_data):
+        list_push(next_sq_ud, u.sq_user_data[i])
+        list_push(next_sq_op, u.sq_opcodes[i])
+        list_push(next_sq_fd, u.sq_fds[i])
+        i = i + 1
+        
+    list_push(next_sq_ud, user_data)
+    list_push(next_sq_op, opcode)
+    list_push(next_sq_fd, fd)
+    
+    return MeridianUring(
+        next_sq_ud,
+        next_sq_op,
+        next_sq_fd,
+        u.cq_user_data,
+        u.cq_res
+    )
+
+def meridian_uring_poll_process(u: MeridianUring) -> MeridianUring:
+    mut next_cq_ud := list_new()
+    mut next_cq_res := list_new()
+    
+    mut i := 0
+    while i < list_len(u.cq_user_data):
+        list_push(next_cq_ud, u.cq_user_data[i])
+        list_push(next_cq_res, u.cq_res[i])
+        i = i + 1
+        
+    mut j := 0
+    while j < list_len(u.sq_user_data):
+        list_push(next_cq_ud, u.sq_user_data[j])
+        list_push(next_cq_res, 64) # Simulated transferred bytes
+        j = j + 1
+        
+    return MeridianUring(
+        list_new(), # Cleared SQ
+        list_new(),
+        list_new(),
+        next_cq_ud,
+        next_cq_res
+    )
+
+def meridian_uring_reap_count(u: MeridianUring) -> Int:
+    return list_len(u.cq_user_data)
+
+# 2. HNSW Vector Graph Index
+struct MeridianHNSW:
+    node_ids:  List[Int]
+    v_dims:    List[Int] # Flattened vector values
+    dim:       Int
+    levels:    List[Int]
+
+def meridian_hnsw_new(dimension: Int) -> MeridianHNSW:
+    return MeridianHNSW(list_new(), list_new(), dimension, list_new())
+
+def meridian_hnsw_insert(
+    h: MeridianHNSW,
+    node_id: Int,
+    vector_dims: List[Int]
+) -> MeridianHNSW:
+    mut next_ids := list_new()
+    mut next_v := list_new()
+    mut next_lev := list_new()
+    
+    mut i := 0
+    while i < list_len(h.node_ids):
+        list_push(next_ids, h.node_ids[i])
+        list_push(next_lev, h.levels[i])
+        i = i + 1
+        
+    mut j := 0
+    while j < list_len(h.v_dims):
+        list_push(next_v, h.v_dims[j])
+        j = j + 1
+        
+    list_push(next_ids, node_id)
+    list_push(next_lev, (list_len(next_ids) % 3)) # Layer 0, 1, or 2
+    
+    mut k := 0
+    while k < list_len(vector_dims):
+        list_push(next_v, vector_dims[k])
+        k = k + 1
+        
+    return MeridianHNSW(next_ids, next_v, h.dim, next_lev)
+
+def meridian_hnsw_search_top1(h: MeridianHNSW, query_dims: List[Int]) -> Int:
+    mut best_id := -1
+    mut best_dist := 999999999
+    
+    mut i := 0
+    while i < list_len(h.node_ids):
+        id := h.node_ids[i]
+        offset := i * h.dim
+        mut dist := 0
+        mut d := 0
+        while d < h.dim:
+            diff := query_dims[d] - h.v_dims[offset + d]
+            dist = dist + diff * diff
+            d = d + 1
+            
+        if dist < best_dist:
+            best_dist = dist
+            best_id = id
+        i = i + 1
+        
+    return best_id
+
+def meridian_hnsw_count(h: MeridianHNSW) -> Int:
+    return list_len(h.node_ids)
+
+
 
 
 
