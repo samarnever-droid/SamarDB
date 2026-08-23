@@ -1,4 +1,4 @@
-# samardb-server: Network Server Layer & PostgreSQL Wire Protocol Daemon
+﻿# samardb-server: Network Server Layer & PostgreSQL Wire Protocol Daemon
 # Exposes SamarDB kernel over TCP sockets for standard client drivers (psql, libpq, pgwire).
 
 import bytes
@@ -15,6 +15,7 @@ import wal
 import recovery
 import concur
 import pgwire
+import meridian_plugin
 
 # ── Server State ──────────────────────────────────────────────────────────────
 struct SamarDBServer:
@@ -26,6 +27,7 @@ struct SamarDBServer:
     pool:              BufferPool
     tx_mgr:            TxManager
     wal_mgr:           WalManager
+    meridian:          MeridianPlugin
 
 # ── Initialize Server Engine ──────────────────────────────────────────────────
 def server_init(port: Int) -> SamarDBServer:
@@ -52,6 +54,9 @@ def server_init(port: Int) -> SamarDBServer:
     ts := table_schema_new("accounts", col_names, col_types, 0, 10, 20)
     cat = catalog_add_table(cat, ts)
     
+    # 4. Initialize native MERIDIAN acceleration plugin (default: enabled on port 7717)
+    meridian := meridian_plugin_new(true, "127.0.0.1", 7717)
+    
     return SamarDBServer(
         port,
         true,
@@ -60,7 +65,23 @@ def server_init(port: Int) -> SamarDBServer:
         cat,
         pool,
         tx_mgr,
-        wal_mgr
+        wal_mgr,
+        meridian
+    )
+
+# ── Meridian Plugin Controls ──────────────────────────────────────────────────
+def server_toggle_meridian(srv: SamarDBServer, enable: Bool) -> SamarDBServer:
+    new_plugin := meridian_plugin_toggle(srv.meridian, enable)
+    return SamarDBServer(
+        srv.port,
+        srv.is_running,
+        srv.active_conns,
+        srv.queries_served,
+        srv.cat,
+        srv.pool,
+        srv.tx_mgr,
+        srv.wal_mgr,
+        new_plugin
     )
 
 # ── Network Binding ───────────────────────────────────────────────────────────
@@ -92,7 +113,8 @@ def server_handle_client(srv: SamarDBServer, client_fd: Int) -> SamarDBServer:
             cur_srv.cat,
             cur_srv.pool,
             cur_srv.tx_mgr,
-            cur_srv.wal_mgr
+            cur_srv.wal_mgr,
+            cur_srv.meridian
         )
         
         # Build query response (e.g., SELECT 1 row description + data)
@@ -127,12 +149,68 @@ def server_execute_sql(srv: SamarDBServer, sql_text: Str) -> Tuple[SamarDBServer
     
     if pq.query_type == QUERY_SELECT():
         result_msg = "SELECT 1"
+        if srv.meridian.enabled:
+            next_plugin := meridian_plugin_record_hit(srv.meridian)
+            next_srv = SamarDBServer(
+                srv.port,
+                srv.is_running,
+                srv.active_conns,
+                srv.queries_served + 1,
+                srv.cat,
+                srv.pool,
+                srv.tx_mgr,
+                srv.wal_mgr,
+                next_plugin
+            )
+            return (next_srv, result_msg)
     elif pq.query_type == QUERY_INSERT():
         result_msg = "INSERT 0 1"
+        if srv.meridian.enabled:
+            next_plugin := meridian_plugin_record_delta(srv.meridian)
+            next_srv = SamarDBServer(
+                srv.port,
+                srv.is_running,
+                srv.active_conns,
+                srv.queries_served + 1,
+                srv.cat,
+                srv.pool,
+                srv.tx_mgr,
+                srv.wal_mgr,
+                next_plugin
+            )
+            return (next_srv, result_msg)
     elif pq.query_type == QUERY_UPDATE():
         result_msg = "UPDATE 1"
+        if srv.meridian.enabled:
+            next_plugin := meridian_plugin_record_delta(srv.meridian)
+            next_srv = SamarDBServer(
+                srv.port,
+                srv.is_running,
+                srv.active_conns,
+                srv.queries_served + 1,
+                srv.cat,
+                srv.pool,
+                srv.tx_mgr,
+                srv.wal_mgr,
+                next_plugin
+            )
+            return (next_srv, result_msg)
     elif pq.query_type == QUERY_DELETE():
         result_msg = "DELETE 1"
+        if srv.meridian.enabled:
+            next_plugin := meridian_plugin_record_invalidation(srv.meridian)
+            next_srv = SamarDBServer(
+                srv.port,
+                srv.is_running,
+                srv.active_conns,
+                srv.queries_served + 1,
+                srv.cat,
+                srv.pool,
+                srv.tx_mgr,
+                srv.wal_mgr,
+                next_plugin
+            )
+            return (next_srv, result_msg)
     else:
         result_msg = "COMMAND COMPLETE"
         
@@ -144,7 +222,8 @@ def server_execute_sql(srv: SamarDBServer, sql_text: Str) -> Tuple[SamarDBServer
         srv.cat,
         srv.pool,
         srv.tx_mgr,
-        srv.wal_mgr
+        srv.wal_mgr,
+        srv.meridian
     )
     return (next_srv, result_msg)
 

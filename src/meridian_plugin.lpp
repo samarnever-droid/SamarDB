@@ -1,0 +1,86 @@
+﻿# samardb-meridian-plugin: Native In-Memory Acceleration & CDC Sync Plugin
+# Allows toggling MERIDIAN L1 cache on/off dynamically at runtime.
+
+import bytes
+
+struct MeridianPlugin:
+    enabled:              Bool
+    host:                 String
+    port:                 Int
+    delta_enabled:        Bool
+    cache_hits:           Int
+    cache_misses:         Int
+    deltas_pushed:        Int
+    invalidations_pushed: Int
+
+def meridian_plugin_new(enabled: Bool, host: String, port: Int) -> MeridianPlugin:
+    return MeridianPlugin(
+        enabled,
+        host,
+        port,
+        true,
+        0,
+        0,
+        0,
+        0
+    )
+
+def meridian_plugin_toggle(p: MeridianPlugin, enabled: Bool) -> MeridianPlugin:
+    return MeridianPlugin(
+        enabled,
+        p.host,
+        p.port,
+        p.delta_enabled,
+        p.cache_hits,
+        p.cache_misses,
+        p.deltas_pushed,
+        p.invalidations_pushed
+    )
+
+def meridian_plugin_record_hit(p: MeridianPlugin) -> MeridianPlugin:
+    return MeridianPlugin(
+        p.enabled,
+        p.host,
+        p.port,
+        p.delta_enabled,
+        p.cache_hits + 1,
+        p.cache_misses,
+        p.deltas_pushed,
+        p.invalidations_pushed
+    )
+
+def meridian_plugin_record_miss(p: MeridianPlugin) -> MeridianPlugin:
+    return MeridianPlugin(
+        p.enabled,
+        p.host,
+        p.port,
+        p.delta_enabled,
+        p.cache_hits,
+        p.cache_misses + 1,
+        p.deltas_pushed,
+        p.invalidations_pushed
+    )
+
+def meridian_plugin_record_delta(p: MeridianPlugin) -> MeridianPlugin:
+    return MeridianPlugin(
+        p.enabled,
+        p.host,
+        p.port,
+        p.delta_enabled,
+        p.cache_hits,
+        p.cache_misses,
+        p.deltas_pushed + 1,
+        p.invalidations_pushed
+    )
+
+def meridian_plugin_record_invalidation(p: MeridianPlugin) -> MeridianPlugin:
+    return MeridianPlugin(
+        p.enabled,
+        p.host,
+        p.port,
+        p.delta_enabled,
+        p.cache_hits,
+        p.cache_misses,
+        p.deltas_pushed,
+        p.invalidations_pushed + 1
+    )
