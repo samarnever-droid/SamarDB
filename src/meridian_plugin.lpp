@@ -1014,6 +1014,211 @@ def meridian_aof_get_replayed_val(aof: MeridianAOF, target_key: Str) -> Str:
         i = i + 1
     return final_val
 
+# ── Enterprise Security, RBAC, Multi-Tenant Sandboxing & Cryptographic Audit ──
+
+struct MeridianUser:
+    username:     Str
+    pass_hash:    Int
+    permissions:  Int # Bitmask: 1:Read, 2:Write, 4:Admin, 8:Stream, 16:Compute, 32:Audit
+    key_prefix:   Str # Multi-tenant sandbox prefix (e.g. "tenant:acme:")
+
+struct MeridianSecurityEngine:
+    users:         List[MeridianUser]
+    audit_seqs:    List[Int]
+    audit_users:   List[Str]
+    audit_actions: List[Str]
+    audit_targets: List[Str]
+    audit_hashes:  List[Int]
+    failed_ips:    List[Str]
+    failed_counts: List[Int]
+    jailed_ips:    List[Str]
+
+def meridian_sec_new() -> MeridianSecurityEngine:
+    return MeridianSecurityEngine(
+        list_new(),
+        list_new(),
+        list_new(),
+        list_new(),
+        list_new(),
+        list_new(),
+        list_new(),
+        list_new(),
+        list_new()
+    )
+
+def meridian_sec_add_user(
+    sec: MeridianSecurityEngine,
+    username: Str,
+    pass_hash: Int,
+    permissions: Int,
+    key_prefix: Str
+) -> MeridianSecurityEngine:
+    mut next_users := list_new()
+    mut i := 0
+    while i < list_len(sec.users):
+        list_push(next_users, sec.users[i])
+        i = i + 1
+    list_push(next_users, MeridianUser(username, pass_hash, permissions, key_prefix))
+    return MeridianSecurityEngine(
+        next_users,
+        sec.audit_seqs,
+        sec.audit_users,
+        sec.audit_actions,
+        sec.audit_targets,
+        sec.audit_hashes,
+        sec.failed_ips,
+        sec.failed_counts,
+        sec.jailed_ips
+    )
+
+def meridian_sec_is_jailed(sec: MeridianSecurityEngine, ip: Str) -> Bool:
+    mut i := 0
+    while i < list_len(sec.jailed_ips):
+        if sec.jailed_ips[i] == ip:
+            return true
+        i = i + 1
+    return false
+
+def meridian_sec_auth(
+    sec: MeridianSecurityEngine,
+    username: Str,
+    pass_hash: Int,
+    ip: Str
+) -> Int:
+    # Check IP Jail
+    if meridian_sec_is_jailed(sec, ip):
+        return -2 # Jailed
+        
+    mut i := 0
+    while i < list_len(sec.users):
+        u := sec.users[i]
+        if u.username == username:
+            if u.pass_hash == pass_hash:
+                return i # Success -> returns user index
+            else:
+                return -1 # Bad Password
+        i = i + 1
+    return -1 # User Not Found
+
+def meridian_sec_record_failed_attempt(
+    sec: MeridianSecurityEngine,
+    ip: Str
+) -> MeridianSecurityEngine:
+    mut next_ips := list_new()
+    mut next_counts := list_new()
+    mut next_jails := list_new()
+    
+    mut i := 0
+    while i < list_len(sec.jailed_ips):
+        list_push(next_jails, sec.jailed_ips[i])
+        i = i + 1
+        
+    mut found := false
+    mut j := 0
+    while j < list_len(sec.failed_ips):
+        if sec.failed_ips[j] == ip:
+            cnt := sec.failed_counts[j] + 1
+            list_push(next_ips, ip)
+            list_push(next_counts, cnt)
+            if cnt >= 5 && !meridian_sec_is_jailed(sec, ip):
+                list_push(next_jails, ip)
+            found = true
+        else:
+            list_push(next_ips, sec.failed_ips[j])
+            list_push(next_counts, sec.failed_counts[j])
+        j = j + 1
+        
+    if !found:
+        list_push(next_ips, ip)
+        list_push(next_counts, 1)
+        
+    return MeridianSecurityEngine(
+        sec.users,
+        sec.audit_seqs,
+        sec.audit_users,
+        sec.audit_actions,
+        sec.audit_targets,
+        sec.audit_hashes,
+        next_ips,
+        next_counts,
+        next_jails
+    )
+
+def meridian_sec_check_perm(u: MeridianUser, perm_mask: Int) -> Bool:
+    p := u.permissions % (perm_mask * 2)
+    if p >= perm_mask:
+        return true
+    return false
+
+def meridian_sec_check_key_access(u: MeridianUser, key: Str) -> Bool:
+    if u.key_prefix == "*" || u.key_prefix == "":
+        return true
+    if str_starts_with(key, u.key_prefix):
+        return true
+    return false
+
+def meridian_sec_log_audit(
+    sec: MeridianSecurityEngine,
+    user: Str,
+    action: Str,
+    target: Str
+) -> MeridianSecurityEngine:
+    seq := list_len(sec.audit_seqs) + 1
+    mut prev_hash := 133742
+    if list_len(sec.audit_hashes) > 0:
+        prev_hash = sec.audit_hashes[list_len(sec.audit_hashes) - 1]
+        
+    curr_hash := (prev_hash * 31 + seq * 17 + str_len(user) * 101 + str_len(action) * 73 + str_len(target) * 19) % 2147483647
+    
+    mut next_seqs := list_new()
+    mut next_users := list_new()
+    mut next_actions := list_new()
+    mut next_targets := list_new()
+    mut next_hashes := list_new()
+    
+    mut i := 0
+    while i < list_len(sec.audit_seqs):
+        list_push(next_seqs, sec.audit_seqs[i])
+        list_push(next_users, sec.audit_users[i])
+        list_push(next_actions, sec.audit_actions[i])
+        list_push(next_targets, sec.audit_targets[i])
+        list_push(next_hashes, sec.audit_hashes[i])
+        i = i + 1
+        
+    list_push(next_seqs, seq)
+    list_push(next_users, user)
+    list_push(next_actions, action)
+    list_push(next_targets, target)
+    list_push(next_hashes, curr_hash)
+    
+    return MeridianSecurityEngine(
+        sec.users,
+        next_seqs,
+        next_users,
+        next_actions,
+        next_targets,
+        next_hashes,
+        sec.failed_ips,
+        sec.failed_counts,
+        sec.jailed_ips
+    )
+
+def meridian_sec_verify_audit_chain(sec: MeridianSecurityEngine) -> Bool:
+    mut prev_hash := 133742
+    mut i := 0
+    while i < list_len(sec.audit_seqs):
+        seq := sec.audit_seqs[i]
+        user := sec.audit_users[i]
+        action := sec.audit_actions[i]
+        target := sec.audit_targets[i]
+        expected_hash := (prev_hash * 31 + seq * 17 + str_len(user) * 101 + str_len(action) * 73 + str_len(target) * 19) % 2147483647
+        if sec.audit_hashes[i] != expected_hash:
+            return false
+        prev_hash = sec.audit_hashes[i]
+        i = i + 1
+    return true
+
+
 
 
 

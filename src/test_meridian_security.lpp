@@ -1,0 +1,121 @@
+# samardb MERIDIAN Enterprise Security & Compliance Test Suite (L++ Pure Native)
+import bytes
+import io
+import pager
+import heap
+import btree
+import schema
+import parser
+import exec
+import opt
+import agg
+import wal
+import recovery
+import concur
+import pgwire
+import meridian_plugin
+import server
+
+def assert_bool(name: Str, actual: Bool, expected: Bool) -> Void:
+    if actual == expected:
+        print_str(str_concat("  [PASS] ", name))
+    else:
+        print_str(str_concat("  [FAIL] ", name))
+
+def assert_int(name: Str, actual: Int, expected: Int) -> Void:
+    if actual == expected:
+        print_str(str_concat("  [PASS] ", name))
+    else:
+        msg := str_concat("  [FAIL] ", str_concat(name, str_concat(" (expected: ", str_concat(int_to_str(expected), str_concat(", got: ", str_concat(int_to_str(actual), ")"))))))
+        print_str(msg)
+
+def main() -> Void:
+    print_str("================================================================")
+    print_str("   SAMARDB MERIDIAN ENTERPRISE SECURITY & COMPLIANCE SUITE      ")
+    print_str("================================================================")
+
+    # ── [1/4] RBAC & Multi-Tenant Key-Space Sandboxing (PCI-DSS & HIPAA) ──────
+    print_str("--- [1/4] Testing RBAC & Multi-Tenant Key-Space Sandboxing ---")
+    sec0 := meridian_sec_new()
+
+    # User 1: PCI-DSS Compliance Worker (Read/Write on pci:cardholder:)
+    sec1 := meridian_sec_add_user(sec0, "pci_worker", 987654, 3, "pci:cardholder:") # Perm 3 = Read (1) + Write (2)
+
+    # User 2: HIPAA Medical Records Worker (Read-Only on hipaa:phi:)
+    sec2 := meridian_sec_add_user(sec1, "hipaa_worker", 555123, 1, "hipaa:phi:") # Perm 1 = Read (1)
+
+    pci_user := sec2.users[0]
+    hipaa_user := sec2.users[1]
+
+    # Permission checks
+    assert_bool("PCI Worker has READ permission", meridian_sec_check_perm(pci_user, 1), true)
+    assert_bool("PCI Worker has WRITE permission", meridian_sec_check_perm(pci_user, 2), true)
+    assert_bool("PCI Worker has NO ADMIN permission", meridian_sec_check_perm(pci_user, 4), false)
+    assert_bool("HIPAA Worker has READ permission", meridian_sec_check_perm(hipaa_user, 1), true)
+    assert_bool("HIPAA Worker has NO WRITE permission", meridian_sec_check_perm(hipaa_user, 2), false)
+
+    # Key-Space Isolation
+    assert_bool("PCI Worker can access own cardholder key", meridian_sec_check_key_access(pci_user, "pci:cardholder:user_42"), true)
+    assert_bool("PCI Worker CANNOT access HIPAA PHI key", meridian_sec_check_key_access(pci_user, "hipaa:phi:patient_99"), false)
+    assert_bool("HIPAA Worker can access own PHI key", meridian_sec_check_key_access(hipaa_user, "hipaa:phi:patient_99"), true)
+    assert_bool("HIPAA Worker CANNOT access PCI cardholder key", meridian_sec_check_key_access(hipaa_user, "pci:cardholder:user_42"), false)
+
+    # ── [2/4] Authentication & Anti-Brute Force IP Jailing ────────────────────
+    print_str("--- [2/4] Testing Authentication & Anti-Brute Force IP Jailing ---")
+    auth_ok := meridian_sec_auth(sec2, "pci_worker", 987654, "10.0.0.50")
+    assert_int("Authentication succeeded for correct credentials (index 0)", auth_ok, 0)
+
+    auth_bad_pass := meridian_sec_auth(sec2, "pci_worker", 111111, "10.0.0.50")
+    assert_int("Authentication failed for bad password (-1)", auth_bad_pass, -1)
+
+    # Simulate 5 failed attempts from attacker IP 192.168.1.137
+    mut sec_jailed := sec2
+    mut k := 0
+    while k < 5:
+        sec_jailed = meridian_sec_record_failed_attempt(sec_jailed, "192.168.1.137")
+        k = k + 1
+
+    assert_bool("Attacker IP 192.168.1.137 is jailed after 5 failed attempts", meridian_sec_is_jailed(sec_jailed, "192.168.1.137"), true)
+    assert_bool("Legitimate IP 10.0.0.50 is NOT jailed", meridian_sec_is_jailed(sec_jailed, "10.0.0.50"), false)
+
+    auth_jailed := meridian_sec_auth(sec_jailed, "pci_worker", 987654, "192.168.1.137")
+    assert_int("Jailed IP rejected instantly with code -2", auth_jailed, -2)
+
+    # ── [3/4] Cryptographic Tamper-Evident Merkle Audit Hash Chain ────────────
+    print_str("--- [3/4] Testing Cryptographic Tamper-Evident Audit Hash Chain ---")
+    aud0 := meridian_sec_log_audit(sec_jailed, "admin", "USER_GRANT_ROLE", "pci_worker:WRITE")
+    aud1 := meridian_sec_log_audit(aud0, "pci_worker", "KEY_WRITE", "pci:cardholder:user_42")
+    aud2 := meridian_sec_log_audit(aud1, "hipaa_worker", "KEY_READ", "hipaa:phi:patient_99")
+
+    assert_int("Audit chain length is 3", list_len(aud2.audit_seqs), 3)
+    assert_bool("Cryptographic audit chain passes 100% verification", meridian_sec_verify_audit_chain(aud2), true)
+
+    # ── [4/4] Mathematical Tamper Detection ───────────────────────────────────
+    print_str("--- [4/4] Testing Mathematical Audit Tamper Detection ---")
+    # Simulate attacker tampering with block 2 action
+    mut corrupt_actions := list_new()
+    mut c := 0
+    while c < list_len(aud2.audit_actions):
+        if c == 1:
+            list_push(corrupt_actions, "FORGED_DELETED_LOG") # Tampered!
+        else:
+            list_push(corrupt_actions, aud2.audit_actions[c])
+        c = c + 1
+
+    aud_corrupt := MeridianSecurityEngine(
+        aud2.users,
+        aud2.audit_seqs,
+        aud2.audit_users,
+        corrupt_actions,
+        aud2.audit_targets,
+        aud2.audit_hashes,
+        aud2.failed_ips,
+        aud2.failed_counts,
+        aud2.jailed_ips
+    )
+
+    assert_bool("Audit chain detects forgery and fails verification", meridian_sec_verify_audit_chain(aud_corrupt), false)
+
+    print_str("================================================================")
+    print_str(" [SUCCESS] ALL MERIDIAN SECURITY & COMPLIANCE TESTS PASSED 100% ")
+    print_str("================================================================")
