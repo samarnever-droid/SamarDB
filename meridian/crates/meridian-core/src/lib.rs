@@ -1,4 +1,4 @@
-//! meridian-core — the MERIDIAN cache engine (HELIOS v5 spec, Phases 0–18).
+//! meridian-core — the MERIDIAN cache engine (HELIOS v5 spec, Phases 0–19).
 
 pub mod cdc;
 pub mod chronos;
@@ -19,6 +19,7 @@ pub mod probabilistic;
 pub mod shard_count;
 pub mod side_planes;
 pub mod spectrum;
+pub mod stream;
 pub mod types;
 pub mod vector_plane;
 pub mod zset;
@@ -40,4 +41,5 @@ pub use zset::{ZSet, ZSetItem};
 pub use vector_plane::{VectorIndex, QuantizedVector};
 pub use compute::opcodes::*;
 pub use compute::{MeridianVM, VmResult, VmError, StoredFunction, FunctionCatalog, Compiler, DEFAULT_GAS_BUDGET};
+pub use stream::{Stream, StreamEntry, StreamId, ConsumerGroup, PendingEntry, PubSubBus};
 pub use types::WAYS;

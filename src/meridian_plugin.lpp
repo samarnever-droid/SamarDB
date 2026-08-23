@@ -650,5 +650,144 @@ def meridian_vm_eval(
         ret_val = stack[list_len(stack) - 1]
     return MeridianVmResult(ret_val, gas_limit - gas_remaining, false, 0, staged_deltas)
 
+# ── Streams, Consumer Groups & Pub/Sub (Phase 19) ────────────────────────────
+
+# 1. Append-Only Monotonic Stream
+struct MeridianStream:
+    seq_ids:  List[Int]
+    payloads: List[Str]
+    max_len:  Int
+    cur_seq:  Int
+
+def meridian_stream_new(max_len: Int) -> MeridianStream:
+    return MeridianStream(list_new(), list_new(), max_len, 0)
+
+def meridian_stream_xadd(s: MeridianStream, payload: Str) -> MeridianStream:
+    next_id := s.cur_seq + 1
+    mut next_ids := list_new()
+    mut next_payloads := list_new()
+    
+    # Check if we need to trim the oldest entry
+    cur_len := list_len(s.seq_ids)
+    mut start_idx := 0
+    if cur_len >= s.max_len && cur_len > 0:
+        start_idx = 1 # Skip oldest entry
+        
+    mut i := start_idx
+    while i < cur_len:
+        list_push(next_ids, s.seq_ids[i])
+        list_push(next_payloads, s.payloads[i])
+        i = i + 1
+        
+    list_push(next_ids, next_id)
+    list_push(next_payloads, payload)
+    
+    return MeridianStream(next_ids, next_payloads, s.max_len, next_id)
+
+def meridian_stream_xlen(s: MeridianStream) -> Int:
+    return list_len(s.seq_ids)
+
+def meridian_stream_xrange(s: MeridianStream, start_id: Int, end_id: Int) -> List[Str]:
+    mut res := list_new()
+    mut i := 0
+    while i < list_len(s.seq_ids):
+        id := s.seq_ids[i]
+        if id >= start_id && id <= end_id:
+            list_push(res, s.payloads[i])
+        i = i + 1
+    return res
+
+# 2. Persistent Consumer Group with PEL
+struct MeridianConsumerGroup:
+    name:              Str
+    last_delivered_id: Int
+    pel_ids:           List[Int]
+    pel_consumers:     List[Str]
+
+def meridian_group_new(name: Str) -> MeridianConsumerGroup:
+    return MeridianConsumerGroup(name, 0, list_new(), list_new())
+
+def meridian_group_read(
+    g: MeridianConsumerGroup,
+    consumer: Str,
+    s: MeridianStream,
+    count: Int
+) -> MeridianConsumerGroup:
+    mut next_pel_ids := list_new()
+    mut next_pel_consumers := list_new()
+    
+    # Copy existing PEL
+    mut i := 0
+    while i < list_len(g.pel_ids):
+        list_push(next_pel_ids, g.pel_ids[i])
+        list_push(next_pel_consumers, g.pel_consumers[i])
+        i = i + 1
+        
+    # Read unread stream entries
+    mut read_count := 0
+    mut next_last_id := g.last_delivered_id
+    mut j := 0
+    while j < list_len(s.seq_ids) && read_count < count:
+        id := s.seq_ids[j]
+        if id > g.last_delivered_id:
+            list_push(next_pel_ids, id)
+            list_push(next_pel_consumers, consumer)
+            next_last_id = id
+            read_count = read_count + 1
+        j = j + 1
+        
+    return MeridianConsumerGroup(g.name, next_last_id, next_pel_ids, next_pel_consumers)
+
+def meridian_group_ack(g: MeridianConsumerGroup, ack_id: Int) -> MeridianConsumerGroup:
+    mut next_pel_ids := list_new()
+    mut next_pel_consumers := list_new()
+    
+    mut i := 0
+    while i < list_len(g.pel_ids):
+        if g.pel_ids[i] != ack_id:
+            list_push(next_pel_ids, g.pel_ids[i])
+            list_push(next_pel_consumers, g.pel_consumers[i])
+        i = i + 1
+        
+    return MeridianConsumerGroup(g.name, g.last_delivered_id, next_pel_ids, next_pel_consumers)
+
+def meridian_group_pel_count(g: MeridianConsumerGroup) -> Int:
+    return list_len(g.pel_ids)
+
+# 3. Topic Pub/Sub Router
+struct MeridianPubSub:
+    topics:  List[Str]
+    sub_ids: List[Int]
+
+def meridian_pubsub_new() -> MeridianPubSub:
+    return MeridianPubSub(list_new(), list_new())
+
+def meridian_pubsub_subscribe(ps: MeridianPubSub, topic: Str, sub_id: Int) -> MeridianPubSub:
+    mut next_topics := list_new()
+    mut next_sub_ids := list_new()
+    
+    mut i := 0
+    while i < list_len(ps.topics):
+        list_push(next_topics, ps.topics[i])
+        list_push(next_sub_ids, ps.sub_ids[i])
+        i = i + 1
+        
+    list_push(next_topics, topic)
+    list_push(next_sub_ids, sub_id)
+    
+    return MeridianPubSub(next_topics, next_sub_ids)
+
+def meridian_pubsub_publish(ps: MeridianPubSub, target_topic: Str) -> List[Int]:
+    mut matched := list_new()
+    mut i := 0
+    while i < list_len(ps.topics):
+        top := ps.topics[i]
+        # Match exact or wildcard prefix
+        if top == target_topic || top == "*" || str_starts_with(target_topic, top):
+            list_push(matched, ps.sub_ids[i])
+        i = i + 1
+    return matched
+
+
 
 
