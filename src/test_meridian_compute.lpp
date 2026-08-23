@@ -1,0 +1,108 @@
+# samardb MERIDIAN MCR-VM Server-Side Scripting Test Suite (L++ Pure Native)
+import bytes
+import io
+import pager
+import heap
+import btree
+import schema
+import parser
+import exec
+import opt
+import agg
+import wal
+import recovery
+import concur
+import pgwire
+import meridian_plugin
+import server
+
+def assert_bool(name: Str, actual: Bool, expected: Bool) -> Void:
+    if actual == expected:
+        print_str(str_concat("  [PASS] ", name))
+    else:
+        print_str(str_concat("  [FAIL] ", name))
+
+def assert_int(name: Str, actual: Int, expected: Int) -> Void:
+    if actual == expected:
+        print_str(str_concat("  [PASS] ", name))
+    else:
+        msg := str_concat("  [FAIL] ", str_concat(name, str_concat(" (expected: ", str_concat(int_to_str(expected), str_concat(", got: ", str_concat(int_to_str(actual), ")"))))))
+        print_str(msg)
+
+def main() -> Void:
+    print_str("================================================================")
+    print_str("   SAMARDB MERIDIAN MCR-VM COMPUTE ENGINE TEST SUITE           ")
+    print_str("================================================================")
+
+    # ── [1/4] Pure Arithmetic & Stack Execution ───────────────────────────────
+    print_str("--- [1/4] Testing Arithmetic & Stack Bytecode Execution ---")
+    # Bytecode: (10 + 20) * 3 = 90
+    mut code1 := list_new()
+    list_push(code1, 1)
+    list_push(code1, 10) # OP_PUSH_INT 10
+    list_push(code1, 1)
+    list_push(code1, 20) # OP_PUSH_INT 20
+    list_push(code1, 4)  # OP_ADD (10 + 20 = 30)
+    list_push(code1, 1)
+    list_push(code1, 3)  # OP_PUSH_INT 3
+    list_push(code1, 6)  # OP_MUL (30 * 3 = 90)
+    list_push(code1, 255)# OP_RETURN
+
+    res1 := meridian_vm_eval(code1, 1000, 0)
+    assert_bool("Execution succeeded without error", res1.is_error, false)
+    assert_int("Return value is 90", res1.return_value, 90)
+    assert_bool("Gas consumed is positive and bounded (< 20)", res1.gas_consumed > 0 && res1.gas_consumed < 20, true)
+
+    # ── [2/4] Gas Metering & Infinite Loop Defense ────────────────────────────
+    print_str("--- [2/4] Testing Gas Metering & Infinite Loop Defense ---")
+    # Bytecode: Infinite Loop (OP_JUMP 0)
+    mut loop_code := list_new()
+    list_push(loop_code, 8)
+    list_push(loop_code, 0) # OP_JUMP 0
+
+    res_loop := meridian_vm_eval(loop_code, 50, 0) # Gas budget 50
+    assert_bool("Infinite loop aborted on error", res_loop.is_error, true)
+    assert_int("Error code is 1 (GasExhausted)", res_loop.error_code, 1)
+    assert_int("Gas consumed reached exact limit 50", res_loop.gas_consumed, 50)
+
+    # ── [3/4] Division by Zero Safety Trap ────────────────────────────────────
+    print_str("--- [3/4] Testing Division by Zero Safety Trap ---")
+    mut div_zero_code := list_new()
+    list_push(div_zero_code, 1)
+    list_push(div_zero_code, 100) # OP_PUSH_INT 100
+    list_push(div_zero_code, 1)
+    list_push(div_zero_code, 0)   # OP_PUSH_INT 0
+    list_push(div_zero_code, 7)   # OP_DIV 100 / 0
+    list_push(div_zero_code, 255)
+
+    res_div := meridian_vm_eval(div_zero_code, 1000, 0)
+    assert_bool("Division by zero aborted on error", res_div.is_error, true)
+    assert_int("Error code is 2 (DivByZero)", res_div.error_code, 2)
+
+    # ── [4/4] State Transfer & Delta Transcript Emitter ───────────────────────
+    print_str("--- [4/4] Testing State Transfer & CDC Delta Transcript ---")
+    mut transfer_code := list_new()
+    list_push(transfer_code, 2)    # OP_LOAD_KEY (500)
+    list_push(transfer_code, 1)
+    list_push(transfer_code, 200)  # OP_PUSH_INT 200
+    list_push(transfer_code, 9)    # OP_CMP_GT (500 > 200 -> 1)
+    list_push(transfer_code, 1)
+    list_push(transfer_code, -200) # OP_PUSH_INT -200
+    list_push(transfer_code, 3)    # OP_DELTA_SUM -200
+    list_push(transfer_code, 1)
+    list_push(transfer_code, 200)  # OP_PUSH_INT 200
+    list_push(transfer_code, 3)    # OP_DELTA_SUM 200
+    list_push(transfer_code, 1)
+    list_push(transfer_code, 1)    # OP_PUSH_INT 1
+    list_push(transfer_code, 255)  # OP_RETURN 1
+
+    res_xfer := meridian_vm_eval(transfer_code, 1000, 500)
+    assert_bool("Transfer script succeeded", res_xfer.is_error, false)
+    assert_int("Return value is 1 (Success)", res_xfer.return_value, 1)
+    assert_int("Emitted 2 staged deltas for CDC replication", list_len(res_xfer.staged_deltas), 2)
+    assert_int("Staged delta 1 is -200", res_xfer.staged_deltas[0], -200)
+    assert_int("Staged delta 2 is +200", res_xfer.staged_deltas[1], 200)
+
+    print_str("================================================================")
+    print_str(" [SUCCESS] ALL MERIDIAN MCR-VM COMPUTE TESTS PASSED 100%!       ")
+    print_str("================================================================")

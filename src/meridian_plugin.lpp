@@ -539,3 +539,116 @@ def meridian_vec_search_top1(idx: MeridianVectorIndex, qx: Int, qy: Int, qz: Int
         
     return best_id
 
+# ── MCR-VM (Phase 18): Server-Side Scripting & Custom Compute Plane ───────────
+
+struct MeridianVmResult:
+    return_value:  Int
+    gas_consumed:  Int
+    is_error:      Bool
+    error_code:    Int # 0: None, 1: GasExhausted, 2: DivByZero, 3: StackError
+    staged_deltas: List[Int]
+
+def meridian_vm_eval(
+    bytecode: List[Int],
+    gas_limit: Int,
+    initial_key_val: Int
+) -> MeridianVmResult:
+    mut stack := list_new()
+    mut pc := 0
+    mut gas_remaining := gas_limit
+    mut staged_deltas := list_new()
+    code_len := list_len(bytecode)
+    
+    while pc < code_len:
+        if gas_remaining <= 0:
+            return MeridianVmResult(0, gas_limit, true, 1, list_new()) # 1: GasExhausted
+            
+        op := bytecode[pc]
+        pc = pc + 1
+        gas_remaining = gas_remaining - 1
+        
+        if op == 1: # OP_PUSH_INT
+            val := bytecode[pc]
+            pc = pc + 1
+            list_push(stack, val)
+        elif op == 2: # OP_LOAD_KEY
+            list_push(stack, initial_key_val)
+        elif op == 3: # OP_DELTA_SUM
+            val := stack[list_len(stack) - 1]
+            list_push(staged_deltas, val)
+        elif op == 4: # OP_ADD
+            n := list_len(stack)
+            b := stack[n - 1]
+            a := stack[n - 2]
+            mut next_s := list_new()
+            mut k := 0
+            while k < n - 2:
+                list_push(next_s, stack[k])
+                k = k + 1
+            list_push(next_s, a + b)
+            stack = next_s
+        elif op == 5: # OP_SUB
+            n := list_len(stack)
+            b := stack[n - 1]
+            a := stack[n - 2]
+            mut next_s := list_new()
+            mut k := 0
+            while k < n - 2:
+                list_push(next_s, stack[k])
+                k = k + 1
+            list_push(next_s, a - b)
+            stack = next_s
+        elif op == 6: # OP_MUL
+            n := list_len(stack)
+            b := stack[n - 1]
+            a := stack[n - 2]
+            mut next_s := list_new()
+            mut k := 0
+            while k < n - 2:
+                list_push(next_s, stack[k])
+                k = k + 1
+            list_push(next_s, a * b)
+            stack = next_s
+        elif op == 7: # OP_DIV
+            n := list_len(stack)
+            b := stack[n - 1]
+            if b == 0:
+                return MeridianVmResult(0, gas_limit - gas_remaining, true, 2, list_new()) # 2: DivByZero
+            a := stack[n - 2]
+            mut next_s := list_new()
+            mut k := 0
+            while k < n - 2:
+                list_push(next_s, stack[k])
+                k = k + 1
+            list_push(next_s, a / b)
+            stack = next_s
+        elif op == 8: # OP_JUMP
+            target := bytecode[pc]
+            pc = target
+        elif op == 9: # OP_CMP_GT
+            n := list_len(stack)
+            b := stack[n - 1]
+            a := stack[n - 2]
+            mut next_s := list_new()
+            mut k := 0
+            while k < n - 2:
+                list_push(next_s, stack[k])
+                k = k + 1
+            if a > b:
+                list_push(next_s, 1)
+            else:
+                list_push(next_s, 0)
+            stack = next_s
+        elif op == 255: # OP_RETURN
+            mut ret := 0
+            if list_len(stack) > 0:
+                ret = stack[list_len(stack) - 1]
+            return MeridianVmResult(ret, gas_limit - gas_remaining, false, 0, staged_deltas)
+            
+    mut ret_val := 0
+    if list_len(stack) > 0:
+        ret_val = stack[list_len(stack) - 1]
+    return MeridianVmResult(ret_val, gas_limit - gas_remaining, false, 0, staged_deltas)
+
+
+
