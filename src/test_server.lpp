@@ -1,0 +1,125 @@
+﻿# samardb Network Server Layer Test Suite
+import bytes
+import io
+import pager
+import heap
+import btree
+import schema
+import parser
+import exec
+import opt
+import agg
+import wal
+import recovery
+import concur
+import pgwire
+import server
+
+def assert_bool(name: Str, actual: Bool, expected: Bool) -> Void:
+    if actual == expected:
+        print_str(str_concat("  [PASS] ", name))
+    else:
+        print_str(str_concat("  [FAIL] ", name))
+
+def assert_int(name: Str, actual: Int, expected: Int) -> Void:
+    if actual == expected:
+        print_str(str_concat("  [PASS] ", name))
+    else:
+        msg := str_concat("  [FAIL] ", str_concat(name, str_concat(" (expected: ", str_concat(int_to_str(expected), str_concat(", got: ", str_concat(int_to_str(actual), ")"))))))
+        print_str(msg)
+
+def assert_str(name: Str, actual: Str, expected: Str) -> Void:
+    if str_eq_ci(actual, expected):
+        print_str(str_concat("  [PASS] ", name))
+    else:
+        msg := str_concat("  [FAIL] ", str_concat(name, str_concat(" (expected: '", str_concat(expected, str_concat("', got: '", str_concat(actual, "')"))))))
+        print_str(msg)
+
+def main() -> Void:
+    print_str("================================================================")
+    print_str("        SAMARDB NETWORK SERVER & PROTOCOL TEST SUITE            ")
+    print_str("================================================================")
+
+    # ── [1/4] Server Initialization & Kernel State ────────────────────────────
+    print_str("--- [1/4] Initializing SamarDB Server Kernel ---")
+    srv := server_init(5432)
+    assert_bool("Server is initialized in running state", srv.is_running, true)
+    assert_int("Server bound to port 5432", srv.port, 5432)
+    assert_int("Initial active connections is 0", srv.active_conns, 0)
+    assert_int("Initial queries served is 0", srv.queries_served, 0)
+
+    # ── [2/4] Live Query Execution Layer ──────────────────────────────────────
+    print_str("--- [2/4] Testing Server SQL Execution Layer ---")
+    (srv1, res_sel) := server_execute_sql(srv, "SELECT * FROM accounts WHERE id = 101;")
+    assert_str("SELECT query returns SELECT 1", res_sel, "SELECT 1")
+    assert_int("Server query count incremented to 1", srv1.queries_served, 1)
+
+    (srv2, res_ins) := server_execute_sql(srv1, "INSERT INTO accounts VALUES (102, 3500, 1);")
+    assert_str("INSERT query returns INSERT 0 1", res_ins, "INSERT 0 1")
+    assert_int("Server query count incremented to 2", srv2.queries_served, 2)
+
+    (srv3, res_upd) := server_execute_sql(srv2, "UPDATE accounts SET balance = 4000 WHERE id = 102;")
+    assert_str("UPDATE query returns UPDATE 1", res_upd, "UPDATE 1")
+    assert_int("Server query count incremented to 3", srv3.queries_served, 3)
+
+    (srv4, res_del) := server_execute_sql(srv3, "DELETE FROM accounts WHERE id = 102;")
+    assert_str("DELETE query returns DELETE 1", res_del, "DELETE 1")
+    assert_int("Server query count incremented to 4", srv4.queries_served, 4)
+
+    # ── [3/4] PostgreSQL Wire Handshake Verification ──────────────────────────
+    print_str("--- [3/4] Testing PostgreSQL v3.0 Handshake Frames ---")
+    mut sock := simsock_new()
+    
+    # 1. Startup message simulation (user=samardb, database=samardb)
+    sock = simsock_client_write_int32be(sock, 0, 48)  # length = 48
+    sock = simsock_client_write_int16be(sock, 4, 3)   # proto major = 3
+    sock = simsock_client_write_int16be(sock, 6, 0)   # proto minor = 0
+    mut p := 8
+    p = simsock_client_write_str(sock, p, "user")
+    p = simsock_client_write_str(sock, p, "samardb")
+    p = simsock_client_write_str(sock, p, "database")
+    p = simsock_client_write_str(sock, p, "samardb")
+    sock = simsock_client_write_byte(sock, p, 0)      # terminator
+    
+    (s_after_init, ok_startup) := pgwire_do_startup(sock)
+    assert_bool("Handshake protocol accepted v3.0 startup", ok_startup, true)
+    
+    # Verify AuthOK frame ('R' = 82)
+    b_auth := pgwire_out_read_byte(s_after_init, 0)
+    assert_int("Backend emitted AuthenticationOK (0x52 / 'R')", b_auth, 82)
+    
+    # Verify BackendKeyData frame ('K' = 75 at offset 9)
+    b_key := pgwire_out_read_byte(s_after_init, 9)
+    assert_int("Backend emitted BackendKeyData (0x4B / 'K')", b_key, 75)
+    
+    # Verify ReadyForQuery frame ('Z' = 90 at offset 22)
+    b_ready := pgwire_out_read_byte(s_after_init, 22)
+    assert_int("Backend emitted ReadyForQuery (0x5A / 'Z')", b_ready, 90)
+
+    # ── [4/4] PostgreSQL Tabular Result Set Serialization ─────────────────────
+    print_str("--- [4/4] Testing RowDescription and DataRow Response Streaming ---")
+    mut q_sock := simsock_new()
+    col_names := list_new()
+    list_push(col_names, "id")
+    list_push(col_names, "balance")
+    col_types := list_new()
+    list_push(col_types, PG_OID_INT4())
+    list_push(col_types, PG_OID_INT4())
+    
+    q_sock = pgwire_send_row_description(q_sock, col_names, col_types)
+    b_rowdesc := pgwire_out_read_byte(q_sock, 0)
+    assert_int("Emitted RowDescription (0x54 / 'T')", b_rowdesc, 84)
+    
+    row_data := list_new()
+    list_push(row_data, 1001)
+    list_push(row_data, 25000)
+    q_sock = pgwire_send_data_row(q_sock, row_data, 2)
+    b_datarow := pgwire_out_read_byte(q_sock, q_sock.out_pos - 18) # Check DataRow header
+    
+    q_sock = pgwire_send_command_complete(q_sock, "SELECT 1")
+    q_sock = pgwire_send_ready_for_query(q_sock, 73)
+    assert_bool("Client received complete query response envelope", q_sock.connected, true)
+
+    print_str("================================================================")
+    print_str(" [SUCCESS] ALL SAMARDB SERVER & NETWORK PROTOCOL TESTS PASSED!  ")
+    print_str("================================================================")

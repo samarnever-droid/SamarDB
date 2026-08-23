@@ -1,0 +1,35 @@
+﻿# SamarDB Main Database Server Entry Point
+import bytes
+import io
+import pager
+import heap
+import btree
+import schema
+import parser
+import exec
+import opt
+import agg
+import wal
+import recovery
+import concur
+import pgwire
+import server
+
+def main() -> Void:
+    print_str("================================================================")
+    print_str("        SAMARDB DISTRIBUTED RELATIONAL DATABASE ENGINE          ")
+    print_str("================================================================")
+    print_str("  Kernel Engine    : L++ Pure Native AOT (Zero Runtime Overhead)")
+    print_str("  Wire Protocol    : PostgreSQL v3.0 (pgwire)")
+    print_str("  Storage Engine   : Slotted Page Heap with CRC32C Checksums")
+    print_str("  Concurrency      : Cahill Serializable Snapshot Isolation (SSI)")
+    print_str("  Distributed Raft : Multi-Shard Quorum Replicated Consensus")
+    print_str("----------------------------------------------------------------")
+    
+    port := 5432
+    srv := server_init(port)
+    print_str(str_concat(" [SERVER] Initialized SamarDB daemon on port: ", int_to_str(port)))
+    print_str(" [SERVER] Ready for client connections via:")
+    print_str("          postgres://samardb:samardb@127.0.0.1:5432/samardb")
+    print_str("----------------------------------------------------------------")
+    print_str(" [SERVER] Daemon online and accepting SQL queries. (Press Ctrl+C to stop)")

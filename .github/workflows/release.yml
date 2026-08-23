@@ -60,6 +60,8 @@ jobs:
         run: |
           lpp --version
           mkdir -p dist/bin
+          lpp src/main.lpp
+          lpp src/test_server.lpp
           lpp src/test_5000_quadrant.lpp
           lpp src/test_cluster_raft.lpp
           lpp src/test_father_chaos.lpp
@@ -67,7 +69,7 @@ jobs:
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             cp src/*.exe dist/bin/
           else
-            cp src/test_5000_quadrant src/test_cluster_raft src/test_father_chaos src/test_pg_benchmark dist/bin/ 2>/dev/null || true
+            cp src/main src/test_server src/test_5000_quadrant src/test_cluster_raft src/test_father_chaos src/test_pg_benchmark dist/bin/ 2>/dev/null || true
           fi
           cp -r docs dist/ 2>/dev/null || true
           cp README.md dist/ 2>/dev/null || true

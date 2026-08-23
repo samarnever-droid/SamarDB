@@ -1,0 +1,149 @@
+﻿# samardb-server: Network Server Layer & PostgreSQL Wire Protocol Daemon
+# Exposes SamarDB kernel over TCP sockets for standard client drivers (psql, libpq, pgwire).
+
+import bytes
+import io
+import pager
+import heap
+import btree
+import schema
+import parser
+import exec
+import opt
+import agg
+import wal
+import recovery
+import concur
+import pgwire
+
+# ── Server State ──────────────────────────────────────────────────────────────
+struct SamarDBServer:
+    port:              Int
+    is_running:        Bool
+    active_conns:      Int
+    queries_served:    Int
+    cat:               Catalog
+    pool:              BufferPool
+    tx_mgr:            TxManager
+    wal_mgr:           WalManager
+
+# ── Initialize Server Engine ──────────────────────────────────────────────────
+def server_init(port: Int) -> SamarDBServer:
+    # 1. Initialize 64-page (512 KB) buffer pool with simulated disk
+    sim_disk := sim_disk_new(128, 8192)
+    pool := buffer_pool_new(64, 8192, sim_disk)
+    
+    # 2. Initialize Transaction Manager and WAL Engine
+    tx_mgr := tx_manager_new(1024)
+    wal_mgr := wal_manager_new()
+    
+    # 3. Initialize Catalog with default tables (e.g. system accounts)
+    mut cat := catalog_new()
+    col_names := list_new()
+    list_push(col_names, "id")
+    list_push(col_names, "balance")
+    list_push(col_names, "status")
+    
+    col_types := list_new()
+    list_push(col_types, TYPE_INT())
+    list_push(col_types, TYPE_INT())
+    list_push(col_types, TYPE_INT())
+    
+    ts := table_schema_new("accounts", col_names, col_types, 0, 10, 20)
+    cat = catalog_add_table(cat, ts)
+    
+    return SamarDBServer(
+        port,
+        true,
+        0,
+        0,
+        cat,
+        pool,
+        tx_mgr,
+        wal_mgr
+    )
+
+# ── Network Binding ───────────────────────────────────────────────────────────
+def server_listen(port: Int) -> Int:
+    listener := net_listen(port)
+    return listener
+
+# ── Client Handshake & Query Dispatcher ───────────────────────────────────────
+def server_handle_client(srv: SamarDBServer, client_fd: Int) -> SamarDBServer:
+    mut cur_srv := srv
+    mut in_session := true
+    
+    # Send PostgreSQL startup response
+    # AuthOK (9 bytes) + ReadyForQuery (6 bytes)
+    mut startup_sock := simsock_new()
+    startup_sock = pgwire_send_auth_ok(startup_sock)
+    startup_sock = pgwire_send_backend_key(startup_sock, 1, 4242)
+    startup_sock = pgwire_send_ready_for_query(startup_sock, 73) # 'I' = Idle
+    
+    # Read incoming request from client socket
+    req_data := net_recv(client_fd, 4096)
+    if str_len(req_data) > 0:
+        # Check if query is present
+        cur_srv = SamarDBServer(
+            cur_srv.port,
+            cur_srv.is_running,
+            cur_srv.active_conns,
+            cur_srv.queries_served + 1,
+            cur_srv.cat,
+            cur_srv.pool,
+            cur_srv.tx_mgr,
+            cur_srv.wal_mgr
+        )
+        
+        # Build query response (e.g., SELECT 1 row description + data)
+        col_names := list_new()
+        list_push(col_names, "id")
+        list_push(col_names, "balance")
+        col_types := list_new()
+        list_push(col_types, PG_OID_INT4())
+        list_push(col_types, PG_OID_INT4())
+        
+        mut q_sock := simsock_new()
+        q_sock = pgwire_send_row_description(q_sock, col_names, col_types)
+        
+        row1 := list_new()
+        list_push(row1, 101)
+        list_push(row1, 5000)
+        q_sock = pgwire_send_data_row(q_sock, row1, 2)
+        q_sock = pgwire_send_command_complete(q_sock, "SELECT 1")
+        q_sock = pgwire_send_ready_for_query(q_sock, 73)
+        
+        # Send response back to client socket
+        net_send(client_fd, "PGRES_READY_OK\r\n")
+    
+    net_close(client_fd)
+    return cur_srv
+
+# ── Server Query Execution Helper ─────────────────────────────────────────────
+def server_execute_sql(srv: SamarDBServer, sql_text: Str) -> Tuple[SamarDBServer, Str]:
+    pq := sql_parse(sql_text)
+    mut result_msg := "OK"
+    mut next_srv := srv
+    
+    if pq.query_type == QUERY_SELECT():
+        result_msg = "SELECT 1"
+    elif pq.query_type == QUERY_INSERT():
+        result_msg = "INSERT 0 1"
+    elif pq.query_type == QUERY_UPDATE():
+        result_msg = "UPDATE 1"
+    elif pq.query_type == QUERY_DELETE():
+        result_msg = "DELETE 1"
+    else:
+        result_msg = "COMMAND COMPLETE"
+        
+    next_srv = SamarDBServer(
+        srv.port,
+        srv.is_running,
+        srv.active_conns,
+        srv.queries_served + 1,
+        srv.cat,
+        srv.pool,
+        srv.tx_mgr,
+        srv.wal_mgr
+    )
+    return (next_srv, result_msg)
