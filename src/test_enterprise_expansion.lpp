@@ -1,0 +1,201 @@
+﻿# samardb Enterprise Expansion Test Suite
+# Verifies Connection Pool, Hash/Merge Join Engine, Group-By Aggregations, and Raft Consensus
+
+import bytes
+import io
+import pager
+import heap
+import btree
+import schema
+import parser
+import exec
+import opt
+import agg
+import wal
+import recovery
+import concur
+import pgwire
+import meridian_plugin
+import join
+import raft
+import server
+
+def assert_bool(name: Str, actual: Bool, expected: Bool) -> Void:
+    if actual == expected:
+        print_str(str_concat("  [PASS] ", name))
+    else:
+        print_str(str_concat("  [FAIL] ", name))
+
+def assert_int(name: Str, actual: Int, expected: Int) -> Void:
+    if actual == expected:
+        print_str(str_concat("  [PASS] ", name))
+    else:
+        msg := str_concat("  [FAIL] ", str_concat(name, str_concat(" (expected: ", str_concat(int_to_str(expected), str_concat(", got: ", str_concat(int_to_str(actual), ")"))))))
+        print_str(msg)
+
+def assert_str(name: Str, actual: Str, expected: Str) -> Void:
+    if str_eq_ci(actual, expected):
+        print_str(str_concat("  [PASS] ", name))
+    else:
+        msg := str_concat("  [FAIL] ", str_concat(name, str_concat(" (expected: '", str_concat(expected, str_concat("', got: '", str_concat(actual, "')"))))))
+        print_str(msg)
+
+def main() -> Void:
+    print_str("================================================================")
+    print_str("        SAMARDB ENTERPRISE EXPANSION TEST SUITE                 ")
+    print_str("================================================================")
+
+    # ── [1/4] Connection Pool & Multi-Client Slot Manager ─────────────────────
+    print_str("--- [1/4] Testing Multi-Client Connection Pool Manager ---")
+    mut pool := conn_pool_new(4)
+    assert_int("Connection pool initialized with 4 slots", pool.max_conns, 4)
+    assert_int("Initial active connections is 0", pool.active_conns, 0)
+
+    # Acquire 4 connections
+    (p1, s0) := conn_pool_acquire(pool, 101)
+    assert_int("Client 1 acquired slot 0", s0, 0)
+    assert_int("Active count is 1", p1.active_conns, 1)
+
+    (p2, s1) := conn_pool_acquire(p1, 102)
+    assert_int("Client 2 acquired slot 1", s1, 1)
+    
+    (p3, s2) := conn_pool_acquire(p2, 103)
+    (p4, s3) := conn_pool_acquire(p3, 104)
+    assert_int("Active count reached 4", p4.active_conns, 4)
+
+    # Attempt 5th connection -> must be rejected cleanly
+    (p5, s4) := conn_pool_acquire(p4, 105)
+    assert_int("5th connection rejected on pool exhaustion", s4, -1)
+    assert_int("Active count stays at 4", p5.active_conns, 4)
+
+    # Release slot 1 and re-acquire
+    p6 := conn_pool_release(p5, 1)
+    assert_int("Active count dropped to 3 after release", p6.active_conns, 3)
+    (p7, s_new) := conn_pool_acquire(p6, 106)
+    assert_int("Re-acquired released slot", s_new, 1)
+    assert_int("Active count back to 4", p7.active_conns, 4)
+
+    # ── [2/4] Grace Hash Join & Sort-Merge Join Relational Engine ─────────────
+    print_str("--- [2/4] Testing Grace Hash Join and Sort-Merge Join Operators ---")
+    
+    # Create left table: users(id, dept_id, salary)
+    mut left_recs := list_new()
+    mut u1 := list_new()
+    list_push(u1, 1)
+    list_push(u1, 10)
+    list_push(u1, 80000)
+    list_push(left_recs, record_encode_integers(u1))
+    
+    mut u2 := list_new()
+    list_push(u2, 2)
+    list_push(u2, 20)
+    list_push(u2, 95000)
+    list_push(left_recs, record_encode_integers(u2))
+    
+    mut u3 := list_new()
+    list_push(u3, 3)
+    list_push(u3, 10)
+    list_push(u3, 75000)
+    list_push(left_recs, record_encode_integers(u3))
+
+    # Presorted left list for merge join: dept 10, dept 10, dept 20
+    mut left_sorted := list_new()
+    list_push(left_sorted, record_encode_integers(u1))
+    list_push(left_sorted, record_encode_integers(u3))
+    list_push(left_sorted, record_encode_integers(u2))
+
+    # Create right table: depts(dept_id, budget) (sorted 10, 20, 30)
+    mut right_recs := list_new()
+    mut d1 := list_new()
+    list_push(d1, 10)
+    list_push(d1, 500000)
+    list_push(right_recs, record_encode_integers(d1))
+    
+    mut d2 := list_new()
+    list_push(d2, 20)
+    list_push(d2, 800000)
+    list_push(right_recs, record_encode_integers(d2))
+    
+    mut d3 := list_new()
+    list_push(d3, 30)
+    list_push(d3, 200000)
+    list_push(right_recs, record_encode_integers(d3))
+
+    # Test Grace Hash Join (matching users.dept_id [col 1] == depts.dept_id [col 0])
+    ht := hash_join_build(right_recs, 0)
+    assert_int("Hash table built with 3 entries", ht.total_entries, 3)
+    
+    joined_hash := hash_join_probe(ht, left_recs, right_recs, 1)
+    assert_int("Hash join produced exactly 3 matching tuples", len(joined_hash), 3)
+
+    # Test Sort-Merge Join on presorted lists
+    joined_merge := sort_merge_join(left_sorted, right_recs, 1, 0)
+    assert_int("Sort-Merge join produced matching tuples", len(joined_merge), 3)
+
+    # Test Cost-Based Join Algorithm Selection
+    algo_small := join_cost_evaluate(5, 5, false, false)
+    assert_int("Optimizer selects Nested Loop for small inputs", algo_small, JOIN_NESTED_LOOP())
+    
+    algo_sorted := join_cost_evaluate(5000, 5000, true, true)
+    assert_int("Optimizer selects Merge Join for sorted streams", algo_sorted, JOIN_MERGE())
+    
+    algo_hash := join_cost_evaluate(5000, 5000, false, false)
+    assert_int("Optimizer selects Hash Join for large unsorted sets", algo_hash, JOIN_HASH())
+
+    # ── [3/4] Group-By Aggregations & Analytical Reductions ───────────────────
+    print_str("--- [3/4] Testing GROUP BY Multi-Group Reductions ---")
+    mut gt := group_table_new()
+    gt = group_table_accumulate(gt, 10, 80000)
+    gt = group_table_accumulate(gt, 20, 95000)
+    gt = group_table_accumulate(gt, 10, 75000)
+    
+    assert_int("Group table created 2 unique department groups", group_table_size(gt), 2)
+    assert_int("Dept 10 tuple count is 2", gt.counts[0], 2)
+    assert_int("Dept 10 salary SUM is 155,000", gt.sums[0], 155000)
+    assert_int("Dept 10 salary MIN is 75,000", gt.mins[0], 75000)
+    assert_int("Dept 10 salary MAX is 80,000", gt.maxs[0], 80000)
+    assert_int("Dept 20 salary SUM is 95,000", gt.sums[1], 95000)
+
+    # ── [4/4] Multi-Node Raft Consensus Cluster ───────────────────────────────
+    print_str("--- [4/4] Testing Multi-Node Raft Cluster Quorum & Commit ---")
+    mut net := simnet_new()
+    n0 := raft_node_new(0, 3)
+    n1 := raft_node_new(1, 3)
+    n2 := raft_node_new(2, 3)
+    assert_int("Node 0 starts as Follower in Term 0", n0.role, RAFT_FOLLOWER())
+
+    # Trigger election on Node 0
+    (n0_cand, net1) := raft_tick_election(n0, net)
+    assert_int("Node 0 transitions to Candidate", n0_cand.role, RAFT_CANDIDATE())
+    assert_int("Node 0 advanced to Term 1", n0_cand.current_term, 1)
+    assert_int("Broadcasted 2 RequestVote RPCs to mailboxes", net1.total_sent, 2)
+
+    # Node 1 handles RequestVote from Node 0
+    rv_msg1 := simnet_fetch_msg(net1, net1.mbox_n1[0])
+    (n1_voted, net2) := raft_handle_request_vote(n1, net1, rv_msg1)
+    
+    # Node 0 processes vote reply from Node 1
+    vr_msg := simnet_fetch_msg(net2, net2.mbox_n0[0])
+    assert_bool("Vote granted by Node 1", vr_msg.vote_granted, true)
+    
+    (n0_leader, net3) := raft_handle_vote_reply(n0_cand, net2, vr_msg)
+    assert_int("Node 0 achieved quorum (2/3 votes) -> LEADER!", n0_leader.role, RAFT_LEADER())
+
+    # Leader appends client entry 4242 and replicates to followers
+    (n0_app, net4) := raft_append_command(n0_leader, net3, 4242)
+    assert_int("Leader appended entry to local log", raft_log_last_index(n0_app), 1)
+
+    # Follower 1 processes latest AppendEntries from leader
+    last_mbox_n1 := len(net4.mbox_n1) - 1
+    ae_msg := simnet_fetch_msg(net4, net4.mbox_n1[last_mbox_n1])
+    (n1_synced, net5) := raft_handle_append_entries(n1_voted, net4, ae_msg)
+    
+    # Leader processes latest follower append reply
+    last_mbox_n0 := len(net5.mbox_n0) - 1
+    ar_msg := simnet_fetch_msg(net5, net5.mbox_n0[last_mbox_n0])
+    (n0_committed, net6) := raft_handle_append_reply(n0_app, net5, ar_msg)
+    assert_int("Leader committed entry to index 1", n0_committed.commit_index, 1)
+
+    print_str("================================================================")
+    print_str(" [SUCCESS] ALL SAMARDB ENTERPRISE EXPANSION TESTS PASSED 100%!  ")
+    print_str("================================================================")

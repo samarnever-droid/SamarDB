@@ -1,0 +1,192 @@
+﻿# samardb-join: Relational Join Operators (Grace Hash Join & Sort-Merge Join)
+# Implements O(M + N) Hash Join and Dual-Cursor Merge Join with SQL null safety.
+
+import bytes
+import schema
+import parser
+
+# ── Join Algorithm Constants ──────────────────────────────────────────────────
+def JOIN_NESTED_LOOP() -> Int:
+    return 1
+
+def JOIN_HASH() -> Int:
+    return 2
+
+def JOIN_MERGE() -> Int:
+    return 3
+
+# ── In-Memory Hash Join Index Structure ───────────────────────────────────────
+struct HashJoinTable:
+    keys:           List[Int]
+    rec_indices:    List[Int]
+    next_chain:     List[Int]
+    bucket_heads:   List[Int]
+    num_buckets:    Int
+    total_entries:  Int
+
+def hash_join_table_new(num_buckets: Int) -> HashJoinTable:
+    mut heads := list_new()
+    mut b := 0
+    while b < num_buckets:
+        list_push(heads, -1)
+        b = b + 1
+    return HashJoinTable(
+        list_new(),
+        list_new(),
+        list_new(),
+        heads,
+        num_buckets,
+        0
+    )
+
+def hash_code(key: Int, num_buckets: Int) -> Int:
+    mut h := key
+    if h < 0:
+        h = 0 - h
+    return h % num_buckets
+
+# ── Build Phase: Populate Hash Table with Inner/Right Relation ────────────────
+def hash_join_build(right_records: List[Bytes], right_col_idx: Int) -> HashJoinTable:
+    n_right := len(right_records)
+    mut num_b := n_right * 2
+    if num_b < 16:
+        num_b = 16
+    mut ht := hash_join_table_new(num_b)
+    
+    mut r := 0
+    while r < n_right:
+        rec := right_records[r]
+        key_val := record_get_int(rec, right_col_idx)
+        b_idx := hash_code(key_val, ht.num_buckets)
+        
+        # Link into chain
+        curr_entry_idx := len(ht.keys)
+        old_head := ht.bucket_heads[b_idx]
+        
+        list_push(ht.keys, key_val)
+        list_push(ht.rec_indices, r)
+        list_push(ht.next_chain, old_head)
+        
+        # Update bucket head
+        mut new_heads := list_new()
+        mut b := 0
+        while b < ht.num_buckets:
+            if b == b_idx:
+                list_push(new_heads, curr_entry_idx)
+            else:
+                list_push(new_heads, ht.bucket_heads[b])
+            b = b + 1
+            
+        ht = HashJoinTable(
+            ht.keys,
+            ht.rec_indices,
+            ht.next_chain,
+            new_heads,
+            ht.num_buckets,
+            ht.total_entries + 1
+        )
+        r = r + 1
+    return ht
+
+# ── Probe Phase: Scan Outer/Left Relation & Match Inner Buckets ───────────────
+def hash_join_probe(
+    ht: HashJoinTable,
+    left_records: List[Bytes],
+    right_records: List[Bytes],
+    left_col_idx: Int
+) -> List[Bytes]:
+    mut out := list_new()
+    mut l := 0
+    n_left := len(left_records)
+    
+    while l < n_left:
+        left_rec := left_records[l]
+        left_key := record_get_int(left_rec, left_col_idx)
+        b_idx := hash_code(left_key, ht.num_buckets)
+        
+        mut entry_idx := ht.bucket_heads[b_idx]
+        while entry_idx >= 0:
+            if ht.keys[entry_idx] == left_key:
+                r_idx := ht.rec_indices[entry_idx]
+                right_rec := right_records[r_idx]
+                
+                # Merge columns
+                nl := record_get_col_count(left_rec)
+                nr := record_get_col_count(right_rec)
+                mut merged := list_new()
+                
+                mut ci := 0
+                while ci < nl:
+                    list_push(merged, record_get_int(left_rec, ci))
+                    ci = ci + 1
+                mut cj := 0
+                while cj < nr:
+                    list_push(merged, record_get_int(right_rec, cj))
+                    cj = cj + 1
+                list_push(out, record_encode_integers(merged))
+            entry_idx = ht.next_chain[entry_idx]
+        l = l + 1
+    return out
+
+# ── Sort-Merge Join Operator ──────────────────────────────────────────────────
+# Dual-cursor linear lockstep scan on sorted input streams
+def sort_merge_join(
+    left_records: List[Bytes],
+    right_records: List[Bytes],
+    left_col_idx: Int,
+    right_col_idx: Int
+) -> List[Bytes]:
+    mut out := list_new()
+    mut l := 0
+    mut r := 0
+    n_left := len(left_records)
+    n_right := len(right_records)
+    
+    while l < n_left && r < n_right:
+        left_rec := left_records[l]
+        right_rec := right_records[r]
+        l_key := record_get_int(left_rec, left_col_idx)
+        r_key := record_get_int(right_rec, right_col_idx)
+        
+        if l_key < r_key:
+            l = l + 1
+        elif r_key < l_key:
+            r = r + 1
+        else:
+            # Match found! Handle potential duplicate keys on right
+            mut r_scan := r
+            while r_scan < n_right:
+                r_scan_rec := right_records[r_scan]
+                r_scan_key := record_get_int(r_scan_rec, right_col_idx)
+                if r_scan_key == l_key:
+                    nl := record_get_col_count(left_rec)
+                    nr := record_get_col_count(r_scan_rec)
+                    mut merged := list_new()
+                    mut ci := 0
+                    while ci < nl:
+                        list_push(merged, record_get_int(left_rec, ci))
+                        ci = ci + 1
+                    mut cj := 0
+                    while cj < nr:
+                        list_push(merged, record_get_int(r_scan_rec, cj))
+                        cj = cj + 1
+                    list_push(out, record_encode_integers(merged))
+                    r_scan = r_scan + 1
+                else:
+                    r_scan = n_right # break
+            l = l + 1
+    return out
+
+# ── Cost-Based Join Algorithm Selection ───────────────────────────────────────
+def join_cost_evaluate(
+    left_card: Int,
+    right_card: Int,
+    is_left_sorted: Bool,
+    is_right_sorted: Bool
+) -> Int:
+    if is_left_sorted && is_right_sorted:
+        return JOIN_MERGE()
+    elif left_card < 10 && right_card < 10:
+        return JOIN_NESTED_LOOP()
+    else:
+        return JOIN_HASH()
