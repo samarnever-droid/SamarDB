@@ -1,11 +1,12 @@
-# Compiled binaries and debug symbols
+﻿# Compiled binaries and debug symbols
 *.exe
-!bin/*.exe
 *.ilk
 *.pdb
 *.obj
 *.o
 *.ll
+bin/
+runtime/lpp-net/target/
 
 # Local test artifacts & databases
 artifacts/
