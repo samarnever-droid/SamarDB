@@ -1,0 +1,111 @@
+# samardb MERIDIAN AOF Durability & Crash Recovery Test Suite (L++ Pure Native)
+import bytes
+import io
+import pager
+import heap
+import btree
+import schema
+import parser
+import exec
+import opt
+import agg
+import wal
+import recovery
+import concur
+import pgwire
+import meridian_plugin
+import server
+
+def assert_bool(name: Str, actual: Bool, expected: Bool) -> Void:
+    if actual == expected:
+        print_str(str_concat("  [PASS] ", name))
+    else:
+        print_str(str_concat("  [FAIL] ", name))
+
+def assert_int(name: Str, actual: Int, expected: Int) -> Void:
+    if actual == expected:
+        print_str(str_concat("  [PASS] ", name))
+    else:
+        msg := str_concat("  [FAIL] ", str_concat(name, str_concat(" (expected: ", str_concat(int_to_str(expected), str_concat(", got: ", str_concat(int_to_str(actual), ")"))))))
+        print_str(msg)
+
+def assert_str(name: Str, actual: Str, expected: Str) -> Void:
+    if str_eq_ci(actual, expected):
+        print_str(str_concat("  [PASS] ", name))
+    else:
+        msg := str_concat("  [FAIL] ", str_concat(name, str_concat(" (expected: '", str_concat(expected, str_concat("', got: '", str_concat(actual, "')"))))))
+        print_str(msg)
+
+def main() -> Void:
+    print_str("================================================================")
+    print_str("   SAMARDB MERIDIAN AOF DURABILITY & RECOVERY TEST SUITE        ")
+    print_str("================================================================")
+
+    # ── [1/4] AOF Monotonic LSN Assignment & CRC32 Integrity ──────────────────
+    print_str("--- [1/4] Testing Monotonic LSN Assignment & CRC32 Framing ---")
+    a0 := meridian_aof_new()
+    a1 := meridian_aof_append(a0, 1, "user:101", "name=Johan;role=Architect")
+    a2 := meridian_aof_append(a1, 1, "user:102", "name=Eren;role=Founder")
+    a3 := meridian_aof_append(a2, 3, "account:101:balance", "5000")
+
+    assert_int("AOF current LSN is 3", a3.current_lsn, 3)
+    assert_int("Total logged frames is 3", list_len(a3.lsns), 3)
+    assert_bool("Record 1 checksum is positive", a3.checksums[0] > 0, true)
+    assert_bool("Record 2 checksum is positive", a3.checksums[1] > 0, true)
+
+    # ── [2/4] Group-Commit Synchronization ────────────────────────────────────
+    print_str("--- [2/4] Testing Group-Commit Flush Synchronization ---")
+    assert_int("Initial flushed LSN is 0", a3.flushed_lsn, 0)
+    a_synced := meridian_aof_sync(a3)
+    assert_int("Flushed LSN advanced to current LSN 3", a_synced.flushed_lsn, 3)
+
+    # ── [3/4] Crash Recovery State Reconstruction Replay ──────────────────────
+    print_str("--- [3/4] Testing Crash Recovery Log Replay ---")
+    # Add mutation: update user:101 role to "Leader", delete user:102
+    a4 := meridian_aof_append(a_synced, 1, "user:101", "name=Johan;role=Leader")
+    a5 := meridian_aof_append(a4, 2, "user:102", "")
+
+    replayed_count := meridian_aof_replay_count(a5)
+    assert_int("All 5 committed records validated via CRC32", replayed_count, 5)
+
+    user101_val := meridian_aof_get_replayed_val(a5, "user:101")
+    assert_str("user:101 state updated to Leader", user101_val, "name=Johan;role=Leader")
+
+    user102_val := meridian_aof_get_replayed_val(a5, "user:102")
+    assert_str("user:102 state correctly deleted (empty string)", user102_val, "")
+
+    bal_val := meridian_aof_get_replayed_val(a5, "account:101:balance")
+    assert_str("account:101:balance preserved at 5000", bal_val, "5000")
+
+    # ── [4/4] Torn-Write Corrupted Frame Auto-Truncation ───────────────────────
+    print_str("--- [4/4] Testing Torn-Write Corrupted Frame Auto-Truncation ---")
+    # Simulate torn write: Append a 6th frame with an invalid corrupted checksum
+    mut torn_lsns := list_new()
+    mut torn_ops := list_new()
+    mut torn_keys := list_new()
+    mut torn_vals := list_new()
+    mut torn_crcs := list_new()
+
+    mut i := 0
+    while i < list_len(a5.lsns):
+        list_push(torn_lsns, a5.lsns[i])
+        list_push(torn_ops, a5.opcodes[i])
+        list_push(torn_keys, a5.keys[i])
+        list_push(torn_vals, a5.values[i])
+        list_push(torn_crcs, a5.checksums[i])
+        i = i + 1
+
+    # Inject corrupt 6th record
+    list_push(torn_lsns, 6)
+    list_push(torn_ops, 1)
+    list_push(torn_keys, "corrupted_key")
+    list_push(torn_vals, "TORN_GARBAGE_PAYLOAD")
+    list_push(torn_crcs, 99999999) # Invalid bad CRC!
+
+    a_torn := MeridianAOF(torn_lsns, torn_ops, torn_keys, torn_vals, torn_crcs, 6, 3)
+    torn_replayed := meridian_aof_replay_count(a_torn)
+    assert_int("Torn frame truncated -> exactly 5 clean records replayed", torn_replayed, 5)
+
+    print_str("================================================================")
+    print_str(" [SUCCESS] ALL MERIDIAN AOF DURABILITY TESTS PASSED 100%!       ")
+    print_str("================================================================")

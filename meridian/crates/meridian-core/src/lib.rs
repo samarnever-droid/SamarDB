@@ -1,5 +1,6 @@
-//! meridian-core — the MERIDIAN cache engine (HELIOS v5 spec, Phases 0–19).
+//! meridian-core — the MERIDIAN cache engine (HELIOS v5 spec, Phases 0–21).
 
+pub mod aof;
 pub mod cdc;
 pub mod chronos;
 pub mod compute;
@@ -42,4 +43,5 @@ pub use vector_plane::{VectorIndex, QuantizedVector};
 pub use compute::opcodes::*;
 pub use compute::{MeridianVM, VmResult, VmError, StoredFunction, FunctionCatalog, Compiler, DEFAULT_GAS_BUDGET};
 pub use stream::{Stream, StreamEntry, StreamId, ConsumerGroup, PendingEntry, PubSubBus};
+pub use aof::{AofOpcode, AofRecord, AofWriter, AofSyncPolicy, AofRecovery, AofRecoveryResult, AOF_MAGIC};
 pub use types::WAYS;

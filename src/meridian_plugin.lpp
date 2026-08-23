@@ -901,6 +901,120 @@ def meridian_flash_record_read(
 def meridian_flash_count(f: MeridianFlashTier) -> Int:
     return list_len(f.key_hashes)
 
+# ── Robust Durability & Append-Only Log (AOF) Engine (Phase 21) ───────────────
+
+struct MeridianAOF:
+    lsns:        List[Int]
+    opcodes:     List[Int] # 1: Set, 2: Del, 3: Delta
+    keys:        List[Str]
+    values:      List[Str]
+    checksums:   List[Int]
+    current_lsn: Int
+    flushed_lsn: Int
+
+def meridian_aof_new() -> MeridianAOF:
+    return MeridianAOF(
+        list_new(),
+        list_new(),
+        list_new(),
+        list_new(),
+        list_new(),
+        0,
+        0
+    )
+
+def meridian_aof_crc(val: Str, lsn: Int) -> Int:
+    mut crc := (lsn * 1664525 + str_len(val) * 1013904223) % 2147483647
+    if crc < 0:
+        crc = -crc
+    return crc
+
+def meridian_aof_append(
+    aof: MeridianAOF,
+    opcode: Int,
+    key: Str,
+    value: Str
+) -> MeridianAOF:
+    next_lsn := aof.current_lsn + 1
+    crc := meridian_aof_crc(value, next_lsn)
+    
+    mut next_lsns := list_new()
+    mut next_ops := list_new()
+    mut next_keys := list_new()
+    mut next_vals := list_new()
+    mut next_crcs := list_new()
+    
+    mut i := 0
+    while i < list_len(aof.lsns):
+        list_push(next_lsns, aof.lsns[i])
+        list_push(next_ops, aof.opcodes[i])
+        list_push(next_keys, aof.keys[i])
+        list_push(next_vals, aof.values[i])
+        list_push(next_crcs, aof.checksums[i])
+        i = i + 1
+        
+    list_push(next_lsns, next_lsn)
+    list_push(next_ops, opcode)
+    list_push(next_keys, key)
+    list_push(next_vals, value)
+    list_push(next_crcs, crc)
+    
+    return MeridianAOF(
+        next_lsns,
+        next_ops,
+        next_keys,
+        next_vals,
+        next_crcs,
+        next_lsn,
+        aof.flushed_lsn
+    )
+
+def meridian_aof_sync(aof: MeridianAOF) -> MeridianAOF:
+    return MeridianAOF(
+        aof.lsns,
+        aof.opcodes,
+        aof.keys,
+        aof.values,
+        aof.checksums,
+        aof.current_lsn,
+        aof.current_lsn
+    )
+
+def meridian_aof_replay_count(aof: MeridianAOF) -> Int:
+    mut valid_records := 0
+    mut i := 0
+    while i < list_len(aof.lsns):
+        lsn := aof.lsns[i]
+        val := aof.values[i]
+        stored_crc := aof.checksums[i]
+        expected_crc := meridian_aof_crc(val, lsn)
+        if stored_crc == expected_crc:
+            valid_records = valid_records + 1
+        else:
+            # Torn write detected -> Stop replay and truncate!
+            break
+        i = i + 1
+    return valid_records
+
+def meridian_aof_get_replayed_val(aof: MeridianAOF, target_key: Str) -> Str:
+    mut final_val := ""
+    mut i := 0
+    while i < list_len(aof.lsns):
+        lsn := aof.lsns[i]
+        val := aof.values[i]
+        stored_crc := aof.checksums[i]
+        expected_crc := meridian_aof_crc(val, lsn)
+        if stored_crc != expected_crc:
+            break
+        if aof.keys[i] == target_key:
+            if aof.opcodes[i] == 1 || aof.opcodes[i] == 3: # Set / Delta
+                final_val = val
+            elif aof.opcodes[i] == 2: # Del
+                final_val = ""
+        i = i + 1
+    return final_val
+
+
 
 
 
