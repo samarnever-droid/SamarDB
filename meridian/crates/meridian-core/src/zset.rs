@@ -75,7 +75,7 @@ impl ZSet {
         if start_rank >= self.sorted.len() {
             return Vec::new();
         }
-        let end = (stop_rank + 1).min(self.sorted.len());
+        let end = stop_rank.saturating_add(1).min(self.sorted.len());
         self.sorted[start_rank..end].to_vec()
     }
 
