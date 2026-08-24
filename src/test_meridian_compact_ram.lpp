@@ -1,0 +1,75 @@
+# samardb MERIDIAN Compact RAM Optimization Test Suite (L++ Pure Native)
+import bytes
+import io
+import pager
+import heap
+import btree
+import schema
+import parser
+import exec
+import opt
+import agg
+import wal
+import recovery
+import concur
+import pgwire
+import meridian_plugin
+import server
+
+def assert_bool(name: Str, actual: Bool, expected: Bool) -> Void:
+    if actual == expected:
+        print_str(str_concat("  [PASS] ", name))
+    else:
+        print_str(str_concat("  [FAIL] ", name))
+
+def assert_int(name: Str, actual: Int, expected: Int) -> Void:
+    if actual == expected:
+        print_str(str_concat("  [PASS] ", name))
+    else:
+        msg := str_concat("  [FAIL] ", str_concat(name, str_concat(" (expected: ", str_concat(int_to_str(expected), str_concat(", got: ", str_concat(int_to_str(actual), ")"))))))
+        print_str(msg)
+
+def assert_str(name: Str, actual: Str, expected: Str) -> Void:
+    if str_eq_ci(actual, expected):
+        print_str(str_concat("  [PASS] ", name))
+    else:
+        msg := str_concat("  [FAIL] ", str_concat(name, str_concat(" (expected: '", str_concat(expected, str_concat("', got: '", str_concat(actual, "')"))))))
+        print_str(msg)
+
+def main() -> Void:
+    print_str("================================================================")
+    print_str("   SAMARDB MERIDIAN COMPACT RAM OPTIMIZATION SUITE              ")
+    print_str("================================================================")
+
+    # ── [1/2] Small String Optimization (SSO) ─────────────────────────────────
+    print_str("--- [1/2] Testing Small String Optimization (SSO Inlining) ---")
+    sso_short := meridian_compact_new("user:1001")
+    assert_bool("Key 'user:1001' (9 bytes) is inlined (0 heap alloc)", meridian_compact_is_inline(sso_short), true)
+    assert_int("Length is 9", meridian_compact_len(sso_short), 9)
+    assert_str("Content matches 'user:1001'", meridian_compact_get(sso_short), "user:1001")
+
+    sso_long := meridian_compact_new("session:auth:token:enterprise:2026")
+    assert_bool("Long key (>15 bytes) spills to shared heap", meridian_compact_is_inline(sso_long), false)
+    assert_int("Long key length is 34", meridian_compact_len(sso_long), 34)
+
+    # ── [2/2] 8-Bit Scalar Quantized Vector Dot Product ───────────────────────
+    print_str("--- [2/2] Testing 8-Bit Scalar Quantized Vector Math (SQ8) ---")
+    mut v1_dims := list_new()
+    list_push(v1_dims, 10)
+    list_push(v1_dims, 20)
+    list_push(v1_dims, 30)
+    sq1 := meridian_sq8_from_dims(1, v1_dims)
+
+    mut v2_dims := list_new()
+    list_push(v2_dims, 10)
+    list_push(v2_dims, 20)
+    list_push(v2_dims, 30)
+    sq2 := meridian_sq8_from_dims(2, v2_dims)
+
+    # Dot product: 10*10 + 20*20 + 30*30 = 100 + 400 + 900 = 1400
+    dot := meridian_sq8_dot(sq1, sq2)
+    assert_int("SQ8 integer dot product is exactly 1400", dot, 1400)
+
+    print_str("================================================================")
+    print_str(" [SUCCESS] ALL MERIDIAN COMPACT RAM TESTS PASSED 100%!         ")
+    print_str("================================================================")

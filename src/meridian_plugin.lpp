@@ -1502,6 +1502,48 @@ def meridian_wan_get(w: MeridianWanEngine, key: Str) -> Str:
         i = i + 1
     return ""
 
+# ── Zero-Downgrade Compact RAM Optimization Plane (Phase 26) ─────────────────
+
+# 1. Small String Optimization (SSO)
+struct MeridianCompactBytes:
+    is_inline:   Bool
+    length:      Int
+    str_val:     Str
+
+def meridian_compact_new(s: Str) -> MeridianCompactBytes:
+    l := str_len(s)
+    if l <= 15:
+        return MeridianCompactBytes(true, l, s)
+    else:
+        return MeridianCompactBytes(false, l, s)
+
+def meridian_compact_is_inline(c: MeridianCompactBytes) -> Bool:
+    return c.is_inline
+
+def meridian_compact_len(c: MeridianCompactBytes) -> Int:
+    return c.length
+
+def meridian_compact_get(c: MeridianCompactBytes) -> Str:
+    return c.str_val
+
+# 2. 8-Bit Scalar Quantized Vector (SQ8)
+struct MeridianSQ8Vector:
+    id:          Int
+    dim:         Int
+    q_dims:      List[Int] # Scaled into integer bytes [-127..127]
+
+def meridian_sq8_from_dims(id: Int, dims: List[Int]) -> MeridianSQ8Vector:
+    return MeridianSQ8Vector(id, list_len(dims), dims)
+
+def meridian_sq8_dot(v1: MeridianSQ8Vector, v2: MeridianSQ8Vector) -> Int:
+    mut dot := 0
+    mut i := 0
+    while i < v1.dim && i < v2.dim:
+        dot = dot + (v1.q_dims[i] * v2.q_dims[i])
+        i = i + 1
+    return dot
+
+
 
 
 

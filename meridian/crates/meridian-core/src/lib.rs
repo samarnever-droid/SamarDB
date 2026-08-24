@@ -1,9 +1,10 @@
-//! meridian-core — the MERIDIAN cache engine (HELIOS v5 spec, Phases 0–25).
+//! meridian-core — the MERIDIAN cache engine (HELIOS v5 spec, Phases 0–26).
 
 pub mod aof;
 pub mod cdc;
 pub mod chronos;
 pub mod cluster;
+pub mod compact;
 pub mod compute;
 pub mod crdt;
 pub mod deadline;
@@ -52,4 +53,5 @@ pub use security::{User, SecurityManager, AuthError, AuditBlock, AuditLedger, PE
 pub use net::{UringEngine, Sqe, Cqe, UringOpcode};
 pub use vector::{HnswIndex, HnswNode, cosine_similarity, euclidean_distance_sq, dot_product};
 pub use cluster::{SlotTable, SlotState, MigrationController, MigrationTask, MigrationPhase, WanMesh, WanDelta, VectorClock, get_slot, crc16, TOTAL_SLOTS};
+pub use compact::{CompactBytes, TaggedPtr, compress_value, decompress_value, INLINE_CAPACITY, COMPRESSION_THRESHOLD};
 pub use types::WAYS;
