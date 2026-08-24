@@ -8,12 +8,12 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /build/lpp
-RUN git clone https://github.com/your-username/lpp.git . && cargo build --release
+RUN git clone https://github.com/samarnever-droid/lplusplus.git . && cargo build --release
 ENV PATH="/build/lpp/target/release:${PATH}"
 
 WORKDIR /build/samardb
 COPY . .
-RUN lpp src/server.lpp -o /build/samardb/samardb-server
+RUN lpp src/main.lpp -o /build/samardb/samardb-server
 
 # Runtime Stage
 FROM ubuntu:22.04

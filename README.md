@@ -53,7 +53,7 @@ psql -h 127.0.0.1 -p 5432 -U samardb -d samardb
 SamarDB compiles directly to a **`106 KB` standalone WASM binary** for Cloudflare Workers, Vercel Edge, and browser runtimes:
 
 ```bash
-lpp src/server.lpp --backend wasm -o dist/samardb-serverless.wasm
+lpp src/main.lpp --backend wasm -o dist/samardb-serverless.wasm
 ```
 
 ---

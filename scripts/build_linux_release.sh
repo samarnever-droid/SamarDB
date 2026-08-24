@@ -12,13 +12,13 @@ echo "================================================================"
 
 # 1. Compile Native Linux Server Daemon (PostgreSQL Wire Protocol v3.0 on port 5432)
 echo "[*] Compiling Native Linux Server Daemon (AOT ELF Binary)..."
-lpp src/server.lpp -o dist/samardb-server
+lpp src/main.lpp -o dist/samardb-server
 chmod +x dist/samardb-server
 echo "    -> Output: dist/samardb-server"
 
 # 2. Compile Serverless WebAssembly Engine (WASI Edge Sandbox)
 echo "[*] Compiling Serverless WebAssembly Engine (wasm32-wasi)..."
-lpp src/server.lpp --backend wasm -o dist/samardb-serverless.wasm
+lpp src/main.lpp --backend wasm -o dist/samardb-serverless.wasm
 echo "    -> Output: dist/samardb-serverless.wasm"
 
 # 3. Generate SHA-256 Checksums
