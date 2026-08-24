@@ -1,0 +1,39 @@
+name: Release SamarDB v1.2.0 Linux & WASM
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-release:
+    name: Build Linux Native & WASM Release
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout SamarDB
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build and Cache L++ v1.2.0
+        run: |
+          git clone https://github.com/your-username/lpp.git /tmp/lpp
+          cd /tmp/lpp
+          cargo build --release
+          sudo cp target/release/lpp /usr/local/bin/lpp
+
+      - name: Build SamarDB v1.2.0 Release Packages
+        run: |
+          chmod +x scripts/build_linux_release.sh
+          bash scripts/build_linux_release.sh
+
+      - name: Upload Release Binaries
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            dist/samardb-server
+            dist/samardb-serverless.wasm
+            dist/SHA256SUMS

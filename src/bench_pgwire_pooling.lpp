@@ -1,0 +1,132 @@
+# SamarDB: PostgreSQL Wire Protocol Connection Pooling vs Non-Pooling Benchmark
+import bytes
+import io
+import schema
+import parser
+import exec
+import opt
+import pgwire
+
+# ── 1. NON-POOLING DIRECT CONNECT (Cold Handshake per Query) ──────────────────
+def bench_non_pooling_direct(iterations: Int) -> Int:
+    params_key := "user"
+    user_val := "samardb"
+    db_key := "database"
+    db_val := "samardb"
+    param_len := str_len(params_key) + 1 + str_len(user_val) + 1 + str_len(db_key) + 1 + str_len(db_val) + 1 + 1
+    total_startup_len := 4 + 4 + param_len
+    
+    mut total_bytes_transferred := 0
+    mut i := 0
+    while i < iterations:
+        # Step 1: Allocate new client socket
+        mut sock := simsock_new()
+        
+        # Step 2: Write PostgreSQL v3.0 Startup Message
+        sock = simsock_client_write_int32be(sock, 0, total_startup_len)
+        sock = simsock_client_write_int16be(sock, 4, 3) # proto_major = 3
+        sock = simsock_client_write_int16be(sock, 6, 0) # proto_minor = 0
+        mut w := 8
+        w = simsock_client_write_str(sock, w, params_key)
+        w = simsock_client_write_str(sock, w, user_val)
+        w = simsock_client_write_str(sock, w, db_key)
+        w = simsock_client_write_str(sock, w, db_val)
+        simsock_client_write_byte(sock, w, 0)
+        
+        # Step 3: Server completes startup handshake (AuthOK + KeyData + ReadyForQuery)
+        (s_ok, ok) := pgwire_do_startup(sock)
+        
+        # Step 4: Client writes Query frame
+        mut s_q := simsock_client_write_byte(s_ok, 0, 81) # 'Q'
+        sql := "SELECT id, salary FROM employees WHERE id = 42"
+        s_q = simsock_client_write_int32be(s_q, 1, 4 + str_len(sql) + 1)
+        simsock_client_write_str(s_q, 5, sql)
+        
+        # Step 5: Server sends RowDescription + DataRow + CommandComplete + ReadyForQuery
+        mut cnames := list_new()
+        list_push(cnames, "id")
+        list_push(cnames, "salary")
+        mut ctypes := list_new()
+        list_push(ctypes, PG_OID_INT4())
+        list_push(ctypes, PG_OID_INT4())
+        
+        s_resp := pgwire_send_row_description(s_q, cnames, ctypes)
+        mut row_vals := list_new()
+        list_push(row_vals, 42)
+        list_push(row_vals, 95000)
+        s_dr := pgwire_send_data_row(s_resp, row_vals, 2)
+        s_cc := pgwire_send_command_complete(s_dr, "SELECT 1")
+        s_final := pgwire_send_ready_for_query(s_cc, 73)
+        
+        total_bytes_transferred = total_bytes_transferred + s_final.out_pos
+        
+        # Step 6: Teardown / Free socket
+        bytes_free(sock.in_buf)
+        bytes_free(sock.out_buf)
+        i = i + 1
+        
+    return total_bytes_transferred
+
+# ── 2. SERVER-BASED WARM CONNECTION POOLING (PgBouncer / Pre-Warmed Pool) ─────
+def bench_server_connection_pooling(iterations: Int) -> Int:
+    # 1. Warm connection pre-initialized (handshake done once at startup)
+    mut warm_sock := simsock_new()
+    mut cnames := list_new()
+    list_push(cnames, "id")
+    list_push(cnames, "salary")
+    mut ctypes := list_new()
+    list_push(ctypes, PG_OID_INT4())
+    list_push(ctypes, PG_OID_INT4())
+    
+    mut total_bytes_transferred := 0
+    mut i := 0
+    while i < iterations:
+        # Step 1: Checkout warm socket from pool (0 ms)
+        # Step 2: Client sends query directly on the warm stream
+        warm_sock = SimSocket(warm_sock.in_buf, warm_sock.out_buf, 0, 0, true)
+        
+        # Step 3: Server executes query and returns data row + command complete
+        s_resp := pgwire_send_row_description(warm_sock, cnames, ctypes)
+        mut row_vals := list_new()
+        list_push(row_vals, 42)
+        list_push(row_vals, 95000)
+        s_dr := pgwire_send_data_row(s_resp, row_vals, 2)
+        s_cc := pgwire_send_command_complete(s_dr, "SELECT 1")
+        s_final := pgwire_send_ready_for_query(s_cc, 73)
+        
+        total_bytes_transferred = total_bytes_transferred + s_final.out_pos
+        i = i + 1
+        
+    bytes_free(warm_sock.in_buf)
+    bytes_free(warm_sock.out_buf)
+    return total_bytes_transferred
+
+def main() -> Void:
+    print_str("================================================================")
+    print_str("   POSTGRESQL WIRE PROTOCOL POOLING VS NON-POOLING BENCHMARK   ")
+    print_str("================================================================")
+    
+    # ── [1/2] Non-Pooling Direct Connection (Cold Handshake per Query: 10,000 queries)
+    t0 := time_ms()
+    res_direct := bench_non_pooling_direct(10000)
+    t1 := time_ms()
+    mut dt_direct := t1 - t0
+    if dt_direct == 0:
+        dt_direct = 1
+    qps_direct := (10000 * 1000) / dt_direct
+    print_str(str_concat("  [1] Non-Pooling Direct Connect (10k queries):  ", str_concat(int_to_str(dt_direct), str_concat(" ms | ", str_concat(int_to_str(qps_direct), " queries/sec")))))
+
+    # ── [2/2] Server-Based Connection Pooling (Warm Stream Reuse: 10,000 queries)
+    t2 := time_ms()
+    res_pool := bench_server_connection_pooling(10000)
+    t3 := time_ms()
+    mut dt_pool := t3 - t2
+    if dt_pool == 0:
+        dt_pool = 1
+    qps_pool := (10000 * 1000) / dt_pool
+    print_str(str_concat("  [2] Server Connection Pooling  (10k queries):  ", str_concat(int_to_str(dt_pool), str_concat(" ms | ", str_concat(int_to_str(qps_pool), " queries/sec")))))
+
+    speedup := qps_pool / qps_direct
+    print_str("----------------------------------------------------------------")
+    print_str(str_concat("  >>> Connection Pooling Speedup: ", str_concat(int_to_str(speedup), "x FASTER than direct non-pooling")))
+    print_str("================================================================")

@@ -1,0 +1,180 @@
+# SamarDB: Enterprise All-Feature Benchmark Suite (Native Server vs Serverless WASM)
+import bytes
+import meridian_plugin
+
+# ── 1. SECURITY & MERKLE AUDIT CHAIN WORKLOAD ─────────────────────────────────
+def bench_security(iterations: Int) -> Int:
+    sec0 := meridian_sec_new()
+    sec1 := meridian_sec_add_user(sec0, "pci_worker", 987654, 3, "pci:cardholder:")
+    sec2 := meridian_sec_add_user(sec1, "hipaa_worker", 555123, 1, "hipaa:phi:")
+    
+    pci_user := sec2.users[0]
+    hipaa_user := sec2.users[1]
+    
+    mut valid_checks := 0
+    mut aud := sec2
+    mut i := 0
+    while i < iterations:
+        # Check permissions & key isolation
+        if meridian_sec_check_perm(pci_user, 1):
+            valid_checks = valid_checks + 1
+        if meridian_sec_check_key_access(pci_user, "pci:cardholder:user_42"):
+            valid_checks = valid_checks + 1
+        if !meridian_sec_check_key_access(hipaa_user, "pci:cardholder:user_42"):
+            valid_checks = valid_checks + 1
+            
+        # Log cryptographic audit entry
+        aud = meridian_sec_log_audit(aud, "pci_worker", "KEY_WRITE", "pci:cardholder:batch")
+        i = i + 1
+        
+    return valid_checks
+
+# ── 2. STREAMS, CONSUMER GROUPS & WILDCARD PUB/SUB WORKLOAD ────────────────────
+def bench_messaging(iterations: Int) -> Int:
+    mut total_events := 0
+    s := meridian_stream_new(50) # Ring-buffered stream MAXLEN 50
+    mut cur_s := s
+    
+    # 1. Stream ingestion
+    mut i := 0
+    while i < iterations:
+        cur_s = meridian_stream_xadd(cur_s, "event:telemetry:metric_99")
+        i = i + 1
+    total_events = total_events + meridian_stream_xlen(cur_s)
+    
+    # 2. Consumer Group PEL Read & ACK
+    grp := meridian_group_new("stream_consumers")
+    grp_read := meridian_group_read(grp, "worker_alpha", cur_s, 20)
+    total_events = total_events + meridian_group_pel_count(grp_read)
+    
+    # ACK all 20 events
+    mut grp_ack := grp_read
+    mut a := 1
+    while a <= 20:
+        grp_ack = meridian_group_ack(grp_ack, a)
+        a = a + 1
+        
+    # 3. Wildcard Pub/Sub Dispatch
+    ps0 := meridian_pubsub_new()
+    ps1 := meridian_pubsub_subscribe(ps0, "telemetry.us.east", 101)
+    ps2 := meridian_pubsub_subscribe(ps1, "telemetry.us", 202)
+    ps3 := meridian_pubsub_subscribe(ps2, "*", 303)
+    
+    mut p := 0
+    while p < iterations:
+        matches := meridian_pubsub_publish(ps3, "telemetry.us.east")
+        total_events = total_events + list_len(matches)
+        p = p + 1
+        
+    return total_events
+
+# ── 3. KV SMALL STRING OPTIMIZATION (SSO) WORKLOAD ─────────────────────────────
+def bench_kv_sso(iterations: Int) -> Int:
+    mut checksum := 0
+    mut i := 0
+    while i < iterations:
+        mut key := "user:1001"
+        if (i % 2) != 0:
+            key = "session:auth:token:enterprise:2026"
+        c := meridian_compact_new(key)
+        l := meridian_compact_len(c)
+        checksum = checksum + l
+        i = i + 1
+    return checksum
+
+# ── 4. 128-DIMENSIONAL SQ8 VECTOR MATH WORKLOAD ────────────────────────────────
+def bench_sq8_vectors(comparisons: Int) -> Int:
+    mut v1_dims := list_new()
+    mut v2_dims := list_new()
+    mut d := 0
+    while d < 128:
+        list_push(v1_dims, (d * 7 + 3) % 128)
+        list_push(v2_dims, (d * 11 + 5) % 128)
+        d = d + 1
+    
+    sq1 := meridian_sq8_from_dims(1, v1_dims)
+    sq2 := meridian_sq8_from_dims(2, v2_dims)
+    
+    mut total_dot := 0
+    mut k := 0
+    while k < comparisons:
+        dot := meridian_sq8_dot(sq1, sq2)
+        total_dot = total_dot + (dot % 100)
+        k = k + 1
+    return total_dot
+
+# ── 5. MEMORY BUFFER & CRC32 INTEGRITY WORKLOAD ────────────────────────────────
+def bench_crc32(chunks: Int, chunk_size: Int) -> Int:
+    b := bytes_alloc(chunk_size)
+    mut i := 0
+    while i < chunk_size:
+        bytes_set8(b, i, (i * 31 + 17) % 256)
+        i = i + 1
+    
+    mut total_crc := 0
+    mut c := 0
+    while c < chunks:
+        crc := bytes_crc32(b, 0, chunk_size)
+        total_crc = total_crc + (crc % 1000)
+        c = c + 1
+    bytes_free(b)
+    return total_crc
+
+def main() -> Void:
+    print_str("================================================================")
+    print_str("   SAMARDB ALL-FEATURE ENTERPRISE BENCHMARK SUITE               ")
+    print_str("================================================================")
+    
+    # ── [1/5] Security & Merkle Audit Chain (1,000 operations) ────────────────
+    t0 := time_ms()
+    sec_res := bench_security(1000)
+    t1 := time_ms()
+    mut dt_sec := t1 - t0
+    if dt_sec == 0:
+        dt_sec = 1
+    ops_sec := (1000 * 1000) / dt_sec
+    print_str(str_concat("  [1] Security RBAC & Merkle Audit (1,000 ops):  ", str_concat(int_to_str(dt_sec), str_concat(" ms | ", str_concat(int_to_str(ops_sec), " ops/sec")))))
+
+    # ── [2/5] Streams Messaging & Pub/Sub (5,000 operations) ──────────────────
+    t2 := time_ms()
+    msg_res := bench_messaging(5000)
+    t3 := time_ms()
+    mut dt_msg := t3 - t2
+    if dt_msg == 0:
+        dt_msg = 1
+    ops_msg := (5000 * 1000) / dt_msg
+    print_str(str_concat("  [2] Streams Pipeline & Pub/Sub (5,000 ops):    ", str_concat(int_to_str(dt_msg), str_concat(" ms | ", str_concat(int_to_str(ops_msg), " ops/sec")))))
+
+    # ── [3/5] KV SSO & Compact RAM Indexing (100,000 operations) ──────────────
+    t4 := time_ms()
+    sso_res := bench_kv_sso(100000)
+    t5 := time_ms()
+    mut dt_sso := t5 - t4
+    if dt_sso == 0:
+        dt_sso = 1
+    ops_sso := (100000 * 1000) / dt_sso
+    print_str(str_concat("  [3] KV SSO & Compact Indexing (100k ops):      ", str_concat(int_to_str(dt_sso), str_concat(" ms | ", str_concat(int_to_str(ops_sso), " ops/sec")))))
+
+    # ── [4/5] 128-Dim SQ8 Vector Similarity (50,000 comparisons) ──────────────
+    t6 := time_ms()
+    vec_res := bench_sq8_vectors(50000)
+    t7 := time_ms()
+    mut dt_vec := t7 - t6
+    if dt_vec == 0:
+        dt_vec = 1
+    ops_vec := (50000 * 1000) / dt_vec
+    print_str(str_concat("  [4] 128-Dim SQ8 Vector Similarity (50k vec):   ", str_concat(int_to_str(dt_vec), str_concat(" ms | ", str_concat(int_to_str(ops_vec), " vec/sec")))))
+
+    # ── [5/5] Raw Byte Buffer & CRC32 Bandwidth (20 MB) ───────────────────────
+    t8 := time_ms()
+    crc_res := bench_crc32(5000, 4096)
+    t9 := time_ms()
+    mut dt_crc := t9 - t8
+    if dt_crc == 0:
+        dt_crc = 1
+    mb_sec := (20 * 1000) / dt_crc
+    print_str(str_concat("  [5] Memory Buffer & CRC32 Integrity (20 MB):  ", str_concat(int_to_str(dt_crc), str_concat(" ms | ", str_concat(int_to_str(mb_sec), " MB/sec")))))
+
+    print_str("================================================================")
+    print_str("   ALL FEATURE BENCHMARKS EXECUTED SUCCESSFULLY                 ")
+    print_str("================================================================")

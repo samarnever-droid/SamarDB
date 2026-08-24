@@ -1,0 +1,209 @@
+# SamarDB: Relational SQL Monster Benchmark Suite (Native Server vs. Serverless WASM)
+import bytes
+import io
+import pager
+import wal
+import heap
+import tx
+import mvcc
+import vacuum
+import btree
+import schema
+import parser
+import exec
+import opt
+
+# ── 1. SQL PARSER & AST COMPILATION BENCHMARK ────────────────────────────────
+def bench_sql_parsing(iterations: Int) -> Int:
+    sql1 := "SELECT id, age, dept_id FROM users WHERE age >= 25"
+    sql2 := "INSERT INTO users VALUES (42, 30, 5)"
+    sql3 := "SELECT users.id, depts.budget FROM users JOIN depts ON users.dept_id = depts.id"
+    
+    mut total_queries := 0
+    mut i := 0
+    while i < iterations:
+        q1 := sql_parse(sql1)
+        q2 := sql_parse(sql2)
+        q3 := sql_parse(sql3)
+        total_queries = total_queries + q1.query_type + q2.query_type + q3.query_type
+        i = i + 1
+    return total_queries
+
+# ── 2. VOLCANO QUERY EXECUTION & RELATIONAL JOINS ────────────────────────────
+def bench_relational_joins(iterations: Int) -> Int:
+    # Setup outer table (50 records)
+    mut left_records := list_new()
+    mut i := 0
+    while i < 50:
+        mut r := list_new()
+        list_push(r, i + 1)              # id
+        list_push(r, 20 + (i % 40))      # age
+        list_push(r, (i % 5) + 1)        # dept_id
+        list_push(left_records, record_encode_integers(r))
+        i = i + 1
+        
+    # Setup inner table (5 departments)
+    mut right_records := list_new()
+    mut d := 0
+    while d < 5:
+        mut dr := list_new()
+        list_push(dr, d + 1)             # id
+        list_push(dr, (d + 1) * 100000)  # budget
+        list_push(right_records, record_encode_integers(dr))
+        d = d + 1
+        
+    mut total_matched := 0
+    mut k := 0
+    while k < iterations:
+        # 1. Filter: age (col 1) >= 35
+        filtered := execute_filter(left_records, 1, OP_GTE(), 35)
+        
+        # 2. NestedLoopJoin on dept_id (col 2) == dept.id (col 0)
+        joined := execute_nested_loop_join(filtered, right_records, 2, 0)
+        
+        # 3. Project: user_id (0) and dept_budget (4)
+        mut proj_indices := list_new()
+        list_push(proj_indices, 0)
+        list_push(proj_indices, 4)
+        projected := execute_project(joined, proj_indices)
+        
+        total_matched = total_matched + len(projected)
+        k = k + 1
+        
+    return total_matched
+
+# ── 3. SLOTTED PAGE HEAP STORAGE & RECORD ENCODING ───────────────────────────
+def bench_slotted_page_heap(iterations: Int) -> Int:
+    page_size := 8192
+    mut total_ops := 0
+    mut i := 0
+    while i < iterations:
+        mut p := heap_page_init(page_size)
+        
+        # Encode 10 binary records into slotted page
+        mut r := 0
+        while r < 10:
+            rec := bytes_alloc(32)
+            bytes_set64le(rec, 0, i * 10 + r)
+            bytes_set64le(rec, 8, (i * 10 + r) * 100)
+            (p_new, slot, ok) := heap_page_insert(p, rec)
+            p = p_new
+            bytes_free(rec)
+            r = r + 1
+            
+        # Read back slot 5
+        (rec_read, ok_read) := heap_page_read(p, 5)
+        if ok_read:
+            total_ops = total_ops + bytes_get64le(rec_read, 0)
+            bytes_free(rec_read)
+            
+        bytes_free(p)
+        i = i + 1
+    return total_ops
+
+# ── 4. B+TREE INDEX BINARY SEARCH & NODE SPLITS ──────────────────────────────
+def bench_btree_index(iterations: Int) -> Int:
+    page_size := 8192
+    mut total_keys := 0
+    mut i := 0
+    while i < iterations:
+        mut leaf := btree_node_init(page_size, PAGE_BTREE_LEAF(), 0)
+        
+        # Insert 15 sorted keys (simulating indexing batch)
+        mut k := 0
+        while k < 15:
+            key := (k * 17 + 3) % 100
+            (l_new, ok) := btree_leaf_insert(leaf, key, 100, k)
+            leaf = l_new
+            k = k + 1
+            
+        # Point lookup for key 20
+        (found_idx, found_exact) := btree_leaf_find_cell(leaf, 20)
+        if found_exact:
+            total_keys = total_keys + found_idx
+            
+        bytes_free(leaf)
+        i = i + 1
+    return total_keys
+
+# ── 5. FULL MVCC SNAPSHOT TRANSACTION CYCLE ──────────────────────────────────
+def bench_mvcc_transactions(iterations: Int) -> Int:
+    mut total_tx := 0
+    tx_mgr := tx_manager_new(4096)
+    snap := Snapshot(100, 105, list_new())
+    
+    mut i := 0
+    while i < iterations:
+        hdr1 := TupleHeader(100, 0, 0, 0, 32)
+        hdr2 := TupleHeader(104, 0, 0, 0, 32)
+        
+        vis1 := mvcc_is_tuple_visible(hdr1, snap, 103, tx_mgr)
+        vis2 := mvcc_is_tuple_visible(hdr2, snap, 103, tx_mgr)
+        
+        if vis1:
+            total_tx = total_tx + 1
+        if !vis2:
+            total_tx = total_tx + 1
+            
+        i = i + 1
+    bytes_free(tx_mgr.clog_buffer)
+    return total_tx
+
+def main() -> Void:
+    print_str("================================================================")
+    print_str("   SAMARDB RELATIONAL SQL MONSTER BENCHMARK SUITE               ")
+    print_str("================================================================")
+    
+    # ── [1/5] SQL AST Parser & Lexer (15,000 parsed queries) ──────────────────
+    t0 := time_ms()
+    p_res := bench_sql_parsing(5000) # 5k x 3 = 15k queries
+    t1 := time_ms()
+    mut dt_p := t1 - t0
+    if dt_p == 0:
+        dt_p = 1
+    ops_p := (15000 * 1000) / dt_p
+    print_str(str_concat("  [1] SQL Lexer & AST Parser (15k queries):      ", str_concat(int_to_str(dt_p), str_concat(" ms | ", str_concat(int_to_str(ops_p), " queries/sec")))))
+
+    # ── [2/5] Volcano Relational Joins & Filters (500 join cycles) ─────────────
+    t2 := time_ms()
+    j_res := bench_relational_joins(500)
+    t3 := time_ms()
+    mut dt_j := t3 - t2
+    if dt_j == 0:
+        dt_j = 1
+    ops_j := (500 * 1000) / dt_j
+    print_str(str_concat("  [2] Volcano Joins & Filters (500 join cycles): ", str_concat(int_to_str(dt_j), str_concat(" ms | ", str_concat(int_to_str(ops_j), " joins/sec")))))
+
+    # ── [3/5] Slotted Page Heap & Tuple Binary Serialization (1,000 pages) ─────
+    t4 := time_ms()
+    h_res := bench_slotted_page_heap(1000) # 10k tuples
+    t5 := time_ms()
+    mut dt_h := t5 - t4
+    if dt_h == 0:
+        dt_h = 1
+    ops_h := (10000 * 1000) / dt_h
+    print_str(str_concat("  [3] Slotted Page Heap & Tuples (10k tuples):   ", str_concat(int_to_str(dt_h), str_concat(" ms | ", str_concat(int_to_str(ops_h), " tuples/sec")))))
+
+    # ── [4/5] B+Tree Index Binary Search & Point Lookups (2,000 batches) ───────
+    t6 := time_ms()
+    b_res := bench_btree_index(2000) # 30k keys
+    t7 := time_ms()
+    mut dt_b := t7 - t6
+    if dt_b == 0:
+        dt_b = 1
+    ops_b := (30000 * 1000) / dt_b
+    print_str(str_concat("  [4] B+Tree Index Lookups & Splits (30k keys):  ", str_concat(int_to_str(dt_b), str_concat(" ms | ", str_concat(int_to_str(ops_b), " keys/sec")))))
+
+    # ── [5/5] MVCC Snapshot Isolation & Visibility (20,000 transactions) ──────
+    t8 := time_ms()
+    m_res := bench_mvcc_transactions(20000)
+    t9 := time_ms()
+    mut dt_m := t9 - t8
+    if dt_m == 0:
+        dt_m = 1
+    ops_m := (20000 * 1000) / dt_m
+    print_str(str_concat("  [5] MVCC Snapshot Isolation (20k tx cycles):   ", str_concat(int_to_str(dt_m), str_concat(" ms | ", str_concat(int_to_str(ops_m), " tx/sec")))))
+
+    print_str("================================================================")
+    print_str("   MONSTER RELATIONAL BENCHMARKS COMPLETED SUCCESSFULLY         ")
+    print_str("================================================================")

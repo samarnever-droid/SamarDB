@@ -1,0 +1,91 @@
+# SamarDB: Native Server vs. Serverless WebAssembly (WASM) Benchmark Harness
+import bytes
+import meridian_plugin
+
+def bench_kv_sso(iterations: Int) -> Int:
+    mut checksum := 0
+    mut i := 0
+    while i < iterations:
+        mut key := "user:1001"
+        if (i % 2) != 0:
+            key = "session:auth:token:enterprise:2026"
+        c := meridian_compact_new(key)
+        l := meridian_compact_len(c)
+        checksum = checksum + l
+        i = i + 1
+    return checksum
+
+def bench_crc32_throughput(chunks: Int, chunk_size: Int) -> Int:
+    b := bytes_alloc(chunk_size)
+    mut i := 0
+    while i < chunk_size:
+        bytes_set8(b, i, (i * 31 + 17) % 256)
+        i = i + 1
+    
+    mut total_crc := 0
+    mut c := 0
+    while c < chunks:
+        crc := bytes_crc32(b, 0, chunk_size)
+        total_crc = total_crc + (crc % 1000)
+        c = c + 1
+    bytes_free(b)
+    return total_crc
+
+def bench_sq8_vectors(comparisons: Int) -> Int:
+    mut v1_dims := list_new()
+    mut v2_dims := list_new()
+    mut d := 0
+    while d < 128:
+        list_push(v1_dims, (d * 7 + 3) % 128)
+        list_push(v2_dims, (d * 11 + 5) % 128)
+        d = d + 1
+    
+    sq1 := meridian_sq8_from_dims(1, v1_dims)
+    sq2 := meridian_sq8_from_dims(2, v2_dims)
+    
+    mut total_dot := 0
+    mut k := 0
+    while k < comparisons:
+        dot := meridian_sq8_dot(sq1, sq2)
+        total_dot = total_dot + (dot % 100)
+        k = k + 1
+    return total_dot
+
+def main() -> Void:
+    print_str("================================================================")
+    print_str("   SAMARDB CORE ENGINE BENCHMARK WORKLOAD                      ")
+    print_str("================================================================")
+    
+    # 1. KV Small String Optimization (SSO) Workload (100,000 ops)
+    t0 := time_ms()
+    sso_res := bench_kv_sso(100000)
+    t1 := time_ms()
+    mut dt_sso := t1 - t0
+    if dt_sso == 0:
+        dt_sso = 1
+    ops_sso := (100000 * 1000) / dt_sso
+    print_str(str_concat("  [1] KV SSO & Compact Indexing (100,000 ops): ", str_concat(int_to_str(dt_sso), str_concat(" ms | Throughput: ", str_concat(int_to_str(ops_sso), " ops/sec")))))
+
+    # 2. Raw Byte Buffer & IEEE 802.3 CRC32 Throughput (10,000 chunks x 4KB = 40 MB)
+    t2 := time_ms()
+    crc_res := bench_crc32_throughput(10000, 4096)
+    t3 := time_ms()
+    mut dt_crc := t3 - t2
+    if dt_crc == 0:
+        dt_crc = 1
+    mb_sec := (40 * 1000) / dt_crc
+    print_str(str_concat("  [2] Memory Buffer & CRC32 Integrity (40 MB): ", str_concat(int_to_str(dt_crc), str_concat(" ms | Bandwidth: ", str_concat(int_to_str(mb_sec), " MB/sec")))))
+
+    # 3. 128-Dimensional SQ8 Vector Dot Product (50,000 comparisons)
+    t4 := time_ms()
+    vec_res := bench_sq8_vectors(50000)
+    t5 := time_ms()
+    mut dt_vec := t5 - t4
+    if dt_vec == 0:
+        dt_vec = 1
+    ops_vec := (50000 * 1000) / dt_vec
+    print_str(str_concat("  [3] 128-Dim SQ8 Vector Similarity (50,000 vectors): ", str_concat(int_to_str(dt_vec), str_concat(" ms | Throughput: ", str_concat(int_to_str(ops_vec), " vec/sec")))))
+    
+    print_str("================================================================")
+    print_str("   WORKLOAD EXECUTION FINISHED SUCCESSFULLY                    ")
+    print_str("================================================================")
