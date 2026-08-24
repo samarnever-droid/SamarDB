@@ -18,7 +18,7 @@ echo "    -> Output: dist/samardb-server"
 
 # 2. Compile Serverless WebAssembly Engine (WASI Edge Sandbox)
 echo "[*] Compiling Serverless WebAssembly Engine (wasm32-wasi)..."
-lpp src/main.lpp --backend wasm -o dist/samardb-serverless.wasm
+lpp src/bench_samardb_vs_postgres_full.lpp --backend wasm -o dist/samardb-serverless.wasm
 echo "    -> Output: dist/samardb-serverless.wasm"
 
 # 3. Generate SHA-256 Checksums
