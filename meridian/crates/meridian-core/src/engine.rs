@@ -625,6 +625,10 @@ impl Engine {
                 wheel_push(&mut w, new_exp, nc, b, way);
             }
             w.retired.push_back((NonNull::from(old), crate::epoch::retire_tag()));
+            if w.retired.len() >= 64 {
+                let barrier = crate::epoch::barrier_tag();
+                sh.drain_retired(&mut w, barrier);
+            }
             sh.stats.sets.fetch_add(1, Ordering::Relaxed);
             let old_val = if o.get_old && !expired {
                 Some(old.val().to_vec())
@@ -682,6 +686,10 @@ impl Engine {
                 sh.entry(b, way).cell.store(0, Ordering::Relaxed);
                 sh.end(b, v);
                 w.retired.push_back((NonNull::from(unsafe { cell(victim) }), crate::epoch::retire_tag()));
+                if w.retired.len() >= 64 {
+                    let barrier = crate::epoch::barrier_tag();
+                    sh.drain_retired(&mut w, barrier);
+                }
                 sh.items.fetch_sub(1, Ordering::Relaxed);
                 sh.stats.evictions.fetch_add(1, Ordering::Relaxed);
                 (b, way)
