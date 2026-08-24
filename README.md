@@ -2,8 +2,9 @@
 
 **SamarDB** is an ultra-high performance distributed relational database engine written in **L++ (Pure Native AOT)**. It natively speaks the **PostgreSQL Wire Protocol v3.0** on port `5432`, providing a lightweight, memory-efficient alternative to traditional PostgreSQL.
 
-[![Release](https://img.shields.io/badge/release-v1.2.0-blue.svg)](https://github.com/your-username/samardb/releases)
-[![Compiler](https://img.shields.io/badge/L%2B%2B-v1.2.0-green.svg)](https://github.com/your-username/lpp)
+[![Release](https://img.shields.io/badge/release-v1.2.0-blue.svg)](https://github.com/samarnever-droid/SamarDB/releases)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Compiler](https://img.shields.io/badge/L%2B%2B-v1.2.0-green.svg)](https://github.com/samarnever-droid/lplusplus)
 [![PostgreSQL](https://img.shields.io/badge/pgwire-v3.0_compatible-336791.svg)](docs/adr/0007-network-protocol.md)
 
 ---
@@ -27,8 +28,8 @@
 ### 1. Build and Run Directly
 ```bash
 # Clone and build
-git clone https://github.com/your-username/samardb.git
-cd samardb
+git clone https://github.com/samarnever-droid/SamarDB.git
+cd SamarDB
 bash scripts/build_linux_release.sh
 
 # Run native server daemon on port 5432
@@ -40,7 +41,7 @@ bash scripts/build_linux_release.sh
 bash scripts/install_samardb.sh
 ```
 
-### 3. Connect with any PostgreSQL Client (`psql`, Prisma, Drizzle, Supabase)
+### 3. Connect with any PostgreSQL Client (`psql`, Prisma, Drizzle, Supabase, instancez)
 ```bash
 psql -h 127.0.0.1 -p 5432 -U samardb -d samardb
 ```
@@ -58,4 +59,4 @@ lpp src/server.lpp --backend wasm -o dist/samardb-serverless.wasm
 ---
 
 ## 📄 License
-MIT © 2026 SamarDB Authors.
+Licensed under the [Apache License, Version 2.0](LICENSE) © 2026 SamarDB Authors.
