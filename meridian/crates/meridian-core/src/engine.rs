@@ -626,7 +626,7 @@ impl Engine {
             }
             w.retired.push_back((NonNull::from(old), crate::epoch::retire_tag()));
             if w.retired.len() >= 64 {
-                let barrier = crate::epoch::barrier_tag();
+                let barrier = crate::epoch::barrier();
                 sh.drain_retired(&mut w, barrier);
             }
             sh.stats.sets.fetch_add(1, Ordering::Relaxed);
@@ -687,7 +687,7 @@ impl Engine {
                 sh.end(b, v);
                 w.retired.push_back((NonNull::from(unsafe { cell(victim) }), crate::epoch::retire_tag()));
                 if w.retired.len() >= 64 {
-                    let barrier = crate::epoch::barrier_tag();
+                    let barrier = crate::epoch::barrier();
                     sh.drain_retired(&mut w, barrier);
                 }
                 sh.items.fetch_sub(1, Ordering::Relaxed);
