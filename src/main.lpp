@@ -1,4 +1,4 @@
-﻿# SamarDB Main Database Server Entry Point
+# SamarDB Main Database Server Entry Point
 import bytes
 import io
 import pager
@@ -27,9 +27,19 @@ def main() -> Void:
     print_str("----------------------------------------------------------------")
     
     port := 5432
-    srv := server_init(port)
+    listen_fd := net_listen(port)
+    if listen_fd <= 0:
+        print_str(" [ERROR] Failed to bind to port 5432")
+        return
+
+    net_set_nonblocking(listen_fd, true)
+    mut srv := server_init(port)
     print_str(str_concat(" [SERVER] Initialized SamarDB daemon on port: ", int_to_str(port)))
     print_str(" [SERVER] Ready for client connections via:")
     print_str("          postgres://samardb:samardb@127.0.0.1:5432/samardb")
     print_str("----------------------------------------------------------------")
     print_str(" [SERVER] Daemon online and accepting SQL queries. (Press Ctrl+C to stop)")
+
+    while srv.is_running:
+        srv = server_poll_conns(srv, listen_fd)
+        sleep_ms(1)
