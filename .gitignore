@@ -1,4 +1,4 @@
-﻿# Compiled binaries and debug symbols
+# Compiled binaries and debug symbols
 *.exe
 *.ilk
 *.pdb
@@ -16,3 +16,5 @@ test_db_*/
 *.sst
 LppData/
 .lpp/
+.agents/
+.agents/mcp_config.json
