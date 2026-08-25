@@ -42,6 +42,30 @@ fn test_io_uring_ring_batching_and_completions() {
 }
 
 #[test]
+fn test_io_uring_wal_zero_copy_batch_commit() {
+    let engine = UringEngine::new(512);
+
+    // Submit 50 asynchronous WAL records
+    for lsn in 1..=50 {
+        let wal_payload = format!("LSN:{}:INSERT INTO orders VALUES ({})", lsn, lsn * 10);
+        engine.submit_wal_record(lsn, 3, wal_payload.as_bytes());
+    }
+
+    assert_eq!(engine.pending_sq_count(), 50);
+
+    // Kernel SQPOLL background batch flush
+    let processed = engine.poll_and_process();
+    assert_eq!(processed, 50);
+    assert_eq!(engine.pending_sq_count(), 0);
+    assert_eq!(engine.max_persisted_lsn.load(std::sync::atomic::Ordering::SeqCst), 50);
+
+    // Verify CQ completions
+    let cqes = engine.reap_completions(50);
+    assert_eq!(cqes.len(), 50);
+    assert!(cqes[0].res > 0, "WAL payload bytes must be positive");
+}
+
+#[test]
 fn test_simd_distance_calculations() {
     let a = vec![1.0, 0.0, 0.0];
     let b = vec![1.0, 0.0, 0.0];

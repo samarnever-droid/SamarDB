@@ -11,6 +11,8 @@ pub enum UringOpcode {
     Send = 3,
     SendZc = 4,
     ProvideBuffers = 5,
+    Writev = 6,
+    Fsync = 7,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +38,7 @@ pub struct UringEngine {
     pub registered_buffers: RwLock<Vec<Vec<u8>>>,
     sq_head: AtomicU64,
     cq_tail: AtomicU64,
+    pub max_persisted_lsn: AtomicU64,
 }
 
 impl UringEngine {
@@ -51,6 +54,7 @@ impl UringEngine {
             registered_buffers: RwLock::new(buffers),
             sq_head: AtomicU64::new(0),
             cq_tail: AtomicU64::new(0),
+            max_persisted_lsn: AtomicU64::new(0),
         }
     }
 
@@ -65,6 +69,18 @@ impl UringEngine {
         self.sq_head.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Submits an asynchronous WAL log record write directly to NVMe SQ ring.
+    pub fn submit_wal_record(&self, lsn: u64, fd: i32, payload: &[u8]) {
+        self.submit_sqe(Sqe {
+            user_data: lsn,
+            opcode: UringOpcode::Writev,
+            fd,
+            buf_index: 0,
+            len: payload.len() as u32,
+            payload: payload.to_vec(),
+        });
+    }
+
     /// Simulates polled kernel ring processing (SQPOLL loop).
     pub fn poll_and_process(&self) -> usize {
         let mut sq = self.sq_ring.write().unwrap();
@@ -77,6 +93,11 @@ impl UringEngine {
                 UringOpcode::Recv => sqe.len as i32,
                 UringOpcode::Send | UringOpcode::SendZc => sqe.payload.len() as i32,
                 UringOpcode::ProvideBuffers => 0,
+                UringOpcode::Writev => {
+                    self.max_persisted_lsn.fetch_max(sqe.user_data, Ordering::SeqCst);
+                    sqe.payload.len() as i32
+                }
+                UringOpcode::Fsync => 0,
             };
 
             cq.push_back(Cqe {
